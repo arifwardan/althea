@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: althea
+      POSTGRES_PASSWORD: althea
+      POSTGRES_DB: althea
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U althea"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./services/api
+    environment:
+      ALTHEA_DATABASE_URL: postgresql+asyncpg://althea:althea@postgres:5432/althea
+      ALTHEA_REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  migrations:
+    build: ./services/api
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      ALTHEA_DATABASE_URL: postgresql+asyncpg://althea:althea@postgres:5432/althea
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ai-engine:
+    build: ./services/ai-engine
+    environment:
+      ALTHEA_AI_OLLAMA_BASE_URL: http://ollama:11434
+    ports:
+      - "8001:8001"
+
+  scheduler:
+    build: ./services/scheduler
+    environment:
+      ALTHEA_SCHEDULER_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ai"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  postgres_data:
+  redis_data:
+  ollama_data:

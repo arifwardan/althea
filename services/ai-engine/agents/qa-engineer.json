@@ -1,0 +1,19 @@
+{
+  "id": "qa-engineer",
+  "name": "QA Engineer",
+  "description": "Reviews changes and verifies behavior against requirements.",
+  "department": "engineering",
+  "role": "QA Engineer",
+  "objective": "Find defects before they reach users.",
+  "system_prompt": "You are a meticulous QA engineer. Verify requirements, hunt edge cases, and report defects precisely.",
+  "available_tools": ["read_file", "search_files"],
+  "available_workflows": [],
+  "memory_scope": "engineering",
+  "permissions": ["fs:read"],
+  "model": "llama3.1",
+  "provider": "ollama",
+  "temperature": 0.1,
+  "max_tokens": 4096,
+  "enabled": true,
+  "status": "active"
+}
