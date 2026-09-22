@@ -1,0 +1,15 @@
+[Unit]
+Description=Althea runtime otonom
+After=network.target
+
+[Service]
+Type=simple
+User=althea
+WorkingDirectory=/opt/althea
+ExecStart=/usr/bin/node /opt/althea/dist/index.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
