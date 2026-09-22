@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Todo App</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="container">
+    <header class="header">
+      <h1>Daftar Tugas</h1>
+      <p class="subtitle">3 tugas &middot; 1 selesai</p>
+    </header>
+
+    <form class="add-form" action="#" method="get">
+      <label class="visually-hidden" for="new-task">Tugas baru</label>
+      <input id="new-task" name="task" type="text" placeholder="Tulis tugas baru..." autocomplete="off">
+      <button type="submit">Tambah</button>
+    </form>
+
+    <ul class="todo-list">
+      <li class="todo">
+        <input id="task-1" type="checkbox">
+        <label for="task-1" class="todo-text">Belajar dasar HTML dan CSS</label>
+        <button type="button" class="delete-btn" aria-label="Hapus tugas Belajar dasar HTML dan CSS">Hapus</button>
+      </li>
+      <li class="todo completed">
+        <input id="task-2" type="checkbox" checked>
+        <label for="task-2" class="todo-text">Membuat kerangka halaman todo</label>
+        <button type="button" class="delete-btn" aria-label="Hapus tugas Membuat kerangka halaman todo">Hapus</button>
+      </li>
+      <li class="todo">
+        <input id="task-3" type="checkbox">
+        <label for="task-3" class="todo-text">Merapikan tampilan akhir</label>
+        <button type="button" class="delete-btn" aria-label="Hapus tugas Merapikan tampilan akhir">Hapus</button>
+      </li>
+    </ul>
+
+    <footer class="footer">
+      <p>Contoh statis untuk pratinjau tampilan.</p>
+    </footer>
+  </main>
+</body>
+</html>
