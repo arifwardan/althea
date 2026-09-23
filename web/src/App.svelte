@@ -1,4 +1,6 @@
 <script>
+  import { highlightCode, langOf } from "./highlight.js";
+  import { summarizeToolCalls } from "./audit.js";
   let meta = $state(null);
   let snap = $state(null);
   let report = $state("");
@@ -9,11 +11,13 @@
   let brainMsg = $state("");
   let cpuHist = $state([]);
   let projects = $state([]);
-  let newProjName = $state("");
-  let newRepoUrl = $state("");
-  let uploadName = $state("");
-  let uploadFile = $state(null);
+  let projName = $state("");
+  let projMode = $state("prompt"); // prompt|repo|zip|prd
+  let projPrompt = $state("");
+  let projRepo = $state("");
+  let projFile = $state(null);
   let projErr = $state("");
+  let projMsg = $state("");
   let taskProject = $state("");
   let authed = $state(null); // null=memuat, true, false
   let pw = $state("");
@@ -29,6 +33,12 @@
     { id: "projects", label: "Projects", icon: "▤" },
     { id: "system", label: "System", icon: "◉" },
   ];
+  const MODES = [
+    { id: "prompt", label: "dari prompt" },
+    { id: "repo", label: "link repo" },
+    { id: "zip", label: "file zip" },
+    { id: "prd", label: "upload PRD" },
+  ];
   function initialView() {
     if (typeof localStorage === "undefined") return "home";
     let v = localStorage.getItem("althea_view") || localStorage.getItem("althea_tab") || "home";
@@ -42,12 +52,24 @@
   let logId = $state(null);
   let logLines = $state([]);
   let logDone = $state(false);
+  let detailId = $state(null);
   let revProj = $state(null);
   let revDiff = $state(null);
   let revFiles = $state([]);
   let revFilePath = $state("");
   let revContent = $state("");
   let revErr = $state("");
+  let mcpInfo = $state(null);
+  let mcpBusy = $state(false);
+  let pvInfo = $state(null);
+  let pvCmd = $state("");
+  let pvBusy = $state(false);
+  let pvFrameKey = $state(0);
+  let showPvLog = $state(false);
+  let fTarget = $state(null); // id tugas untuk tindak lanjut
+  let fText = $state("");
+  let instructText = $state("");
+  let showNote = $state(null); // id tugas yang hasilnya dibuka
   let termTab = $state("term");
   let homeDiff = $state(null);
   let es = null;
@@ -166,45 +188,112 @@
     prompt = "";
   };
 
-  async function addRepo() {
+  async function addProject() {
     projErr = "";
-    if (!newProjName.trim() || !newRepoUrl.trim()) return;
-    busy = "repo";
+    projMsg = "";
+    const name = projName.trim();
+    if (!name) return;
+    busy = "proj";
     try {
-      const r = await api("/api/projects", {
-        method: "POST",
-        body: JSON.stringify({ name: newProjName.trim(), repoUrl: newRepoUrl.trim() }),
+      let r;
+      if (projMode === "prompt" || projMode === "repo") {
+        if (projMode === "prompt" && !projPrompt.trim()) return;
+        if (projMode === "repo" && !projRepo.trim()) return;
+        r = await api("/api/projects", {
+          method: "POST",
+          body: JSON.stringify({
+            name,
+            ...(projMode === "repo" ? { repoUrl: projRepo.trim() } : {}),
+            ...(projPrompt.trim() ? { prompt: projPrompt.trim() } : {}),
+          }),
+        });
+      } else {
+        if (!projFile) return;
+        const fd = new FormData();
+        fd.append("name", name);
+        if (projPrompt.trim()) fd.append("prompt", projPrompt.trim());
+        fd.append("file", projFile, projFile.name);
+        r = await fetch(projMode === "zip" ? "/api/projects/upload" : "/api/projects/prd", {
+          method: "POST", credentials: "include", body: fd,
+        });
+        if (r.status === 401) { authed = false; return; }
+      }
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        projErr = j.error || "gagal membuat project";
+        return;
+      }
+      const auto = projMode === "prompt" || projMode === "prd" || !!projPrompt.trim();
+      projMsg = auto ? `✓ "${name}" dibuat — pipeline jalan, pantau di review.` : `✓ "${name}" dibuat.`;
+      projName = "";
+      projPrompt = "";
+      projRepo = "";
+      projFile = null;
+      const fi = document.getElementById("pfile");
+      if (fi) fi.value = "";
+      await load();
+      goReview(name);
+    } finally {
+      busy = "";
+    }
+  }
+
+  async function pipeAct(name, action) {
+    projErr = "";
+    revErr = "";
+    busy = "pipe";
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(name)}/pipeline`, {
+        method: "POST", body: JSON.stringify({ action }),
       });
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
-        projErr = j.error || "gagal clone";
+        revErr = j.error || "gagal";
         return;
       }
-      newProjName = "";
-      newRepoUrl = "";
       await load();
     } finally {
       busy = "";
     }
   }
 
-  async function uploadZip() {
-    projErr = "";
-    if (!uploadName.trim() || !uploadFile) return;
-    busy = "upload";
+  async function sendFollowup() {
+    if (!fTarget || !fText.trim()) return;
+    revErr = "";
+    busy = "fup";
     try {
-      const fd = new FormData();
-      fd.append("name", uploadName.trim());
-      fd.append("file", uploadFile, uploadFile.name);
-      const r = await fetch("/api/projects/upload", { method: "POST", credentials: "include", body: fd });
-      if (r.status === 401) { authed = false; return; }
+      const r = await api(`/api/tasks/${encodeURIComponent(fTarget)}/followup`, {
+        method: "POST", body: JSON.stringify({ prompt: fText.trim() }),
+      });
       if (!r.ok) {
         const j = await r.json().catch(() => ({}));
-        projErr = j.error || "gagal upload";
+        revErr = j.error || "gagal mengirim";
         return;
       }
-      uploadName = "";
-      uploadFile = null;
+      fTarget = null;
+      fText = "";
+      await load();
+    } finally {
+      busy = "";
+    }
+  }
+
+  async function instruct() {
+    if (!revProj || !instructText.trim()) return;
+    revErr = "";
+    busy = "ins";
+    try {
+      const p = instructText.trim();
+      const r = await api("/api/tasks", {
+        method: "POST",
+        body: JSON.stringify({ title: `instruksi @${revProj}: ${p.slice(0, 60)}`, prompt: p, project: revProj }),
+      });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        revErr = j.error || "gagal mengirim";
+        return;
+      }
+      instructText = "";
       await load();
     } finally {
       busy = "";
@@ -242,15 +331,110 @@
     revFilePath = "";
     revContent = "";
     revErr = "";
+    mcpInfo = null;
+    fTarget = null;
+    fText = "";
+    instructText = "";
+    showNote = null;
     try {
-      const [d, f] = await Promise.all([
+      const [d, f, m, pv] = await Promise.all([
         (await api(`/api/projects/${encodeURIComponent(name)}/diff`)).json(),
         (await api(`/api/projects/${encodeURIComponent(name)}/files`)).json(),
+        (await api(`/api/projects/${encodeURIComponent(name)}/mcps`)).json(),
+        (await api(`/api/projects/${encodeURIComponent(name)}/preview`)).json(),
       ]);
       revDiff = d;
       revFiles = Array.isArray(f) ? f : [];
+      mcpInfo = m?.servers ? m : { servers: [], enabled: [], failed: true };
+      pvInfo = pv?.state ? pv : null;
+      pvCmd = pv?.savedCmd || pv?.cmd || "";
+      showPvLog = false;
     } catch {
       revErr = "gagal memuat review";
+    }
+  }
+
+  async function pvRefresh() {
+    if (!revProj || pvBusy) return;
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(revProj)}/preview`);
+      const j = await r.json();
+      if (r.ok && j?.state) {
+        pvInfo = j;
+        if (j.savedCmd && !pvCmd) pvCmd = j.savedCmd;
+        else if (j.cmd && !pvCmd) pvCmd = j.cmd;
+      }
+    } catch { /* abaikan: tombol segarkan tersedia */ }
+  }
+
+  async function pvStart() {
+    if (!revProj || pvBusy || !pvCmd.trim()) return;
+    pvBusy = true;
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(revProj)}/preview`, {
+        method: "POST", body: JSON.stringify({ action: "start", cmd: pvCmd.trim() }),
+      });
+      const j = await r.json();
+      if (!r.ok && !j?.state) {
+        revErr = j.error || "gagal menyalakan preview";
+        return;
+      }
+      revErr = "";
+      pvFrameKey++;
+      await pvRefreshBusy();
+    } catch {
+      revErr = "gagal menyalakan preview";
+    } finally {
+      pvBusy = false;
+    }
+  }
+
+  async function pvRefreshBusy() {
+    // segarkan tanpa penjaga pvBusy (dipakai tepat setelah start/stop)
+    if (!revProj) return;
+    try {
+      const r = await api(`/api/projects/${encodeURIComponent(revProj)}/preview`);
+      const j = await r.json();
+      if (r.ok && j?.state) pvInfo = j;
+    } catch { /* abaikan */ }
+  }
+
+  async function pvStop() {
+    if (!revProj || pvBusy) return;
+    pvBusy = true;
+    try {
+      await api(`/api/projects/${encodeURIComponent(revProj)}/preview`, {
+        method: "POST", body: JSON.stringify({ action: "stop" }),
+      });
+      await pvRefreshBusy();
+    } catch {
+      revErr = "gagal menghentikan preview";
+    } finally {
+      pvBusy = false;
+    }
+  }
+
+  async function toggleMcp(id) {
+    if (!revProj || !mcpInfo?.servers || mcpBusy) return;
+    mcpBusy = true;
+    try {
+      const cur = new Set(mcpInfo.enabled || []);
+      if (cur.has(id)) cur.delete(id);
+      else cur.add(id);
+      const r = await api(`/api/projects/${encodeURIComponent(revProj)}/mcps`, {
+        method: "PUT", body: JSON.stringify({ mcps: [...cur] }),
+      });
+      const j = await r.json();
+      if (!r.ok) {
+        revErr = j.error || "gagal mengubah MCP";
+        return;
+      }
+      mcpInfo = j;
+      revErr = "";
+    } catch {
+      revErr = "gagal mengubah MCP";
+    } finally {
+      mcpBusy = false;
     }
   }
   function closeReview() {
@@ -259,6 +443,13 @@
   function goReview(name) {
     view = "projects";
     openReview(name);
+  }
+  function goLog(id) {
+    view = "tasks";
+    openLog(id);
+  }
+  function pipeCls(st) {
+    return st === "running" ? "v-ok" : st === "paused" ? "v-warn" : st === "done" ? "v-ok" : "v-err";
   }
   async function openFile(path) {
     revFilePath = path;
@@ -312,8 +503,29 @@
   function tokOf(t) {
     return (t.usage?.tokIn || 0) + (t.usage?.tokOut || 0);
   }
+  function actsOf(id) {
+    return (snap?.activity?.[id] || []).slice(-40);
+  }
+  function lastAct(id) {
+    const arr = snap?.activity?.[id] || [];
+    return arr.length ? arr[arr.length - 1].text : "";
+  }
+  function actCls(a) {
+    if (a.kind === "file") return "v-ok";
+    if (a.kind === "note" || a.text.includes("✕")) return "v-err";
+    return "v-dim";
+  }
+  function filesTouched(id) {
+    const out = [];
+    for (const a of snap?.activity?.[id] || []) {
+      if (a.kind !== "file") continue;
+      const p = a.text.replace(/^(baru|ubah): /, "");
+      if (!out.includes(p)) out.push(p);
+    }
+    return out;
+  }
   function evCls(e) {
-    if (/done|OK|setuju|resume|bangun/i.test(e)) return "v-ok";
+    if (/done|OK|setuju|resume|bangun|selesai/i.test(e)) return "v-ok";
     if (/fail|gagal|TOLAK|tolak|error|batal/i.test(e)) return "v-err";
     if (/limit|eskalasi|auto|izin|approval|cooldown|tidur/i.test(e)) return "v-warn";
     return "v-dim";
@@ -339,6 +551,10 @@
     if (/reset/.test(msg)) return { label: "Token reset", cls: "v-warn" };
     if (/resume|bangun/.test(msg)) return { label: "Resuming", cls: "v-ok" };
     if (/^push /.test(msg)) return { label: "Queued", cls: "v-dim" };
+    if (/pipeline .* SELESAI/.test(msg)) return { label: "Pipeline done", cls: "v-ok" };
+    if (/pipeline .* GAGAL|pipeline .* dihentikan/.test(msg)) return { label: "Pipeline failed", cls: "v-err" };
+    if (/pipeline .* →/.test(msg)) return { label: "Next phase", cls: "v-ok" };
+    if (/^pipeline /.test(msg)) return { label: "Pipeline", cls: "v-dim" };
     if (/project \+/.test(msg)) return { label: "Project added", cls: "v-ok" };
     if (/project -/.test(msg)) return { label: "Project removed", cls: "v-err" };
     if (/tidur/.test(msg)) return { label: "Sleeping", cls: "v-dim" };
@@ -371,6 +587,12 @@
 
   $effect(() => {
     try { localStorage.setItem("althea_view", view); } catch { /* abaikan */ }
+  });
+
+  $effect(() => {
+    if (!revProj) return;
+    const t = setInterval(pvRefresh, 5000);
+    return () => clearInterval(t);
   });
 
   $effect(() => {
@@ -462,7 +684,7 @@
   let timeline = $derived(
     (snap?.events || [])
       .filter((e) => !/graph →|lapor/.test(e.slice(25)))
-      .filter((e) => /push |run |done |fail|gagal|TOLAK|tolak|batal|limit|cooldown|reset|resume|bangun|approval|auto-keputusan|setuju|project [+-]|tidur/.test(e.slice(25)))
+      .filter((e) => /push |run |done |fail|gagal|TOLAK|tolak|batal|limit|cooldown|reset|resume|bangun|approval|auto-keputusan|setuju|project [+-]|pipeline|tidur/.test(e.slice(25)))
       .slice(-10)
       .reverse()
       .map((e) => ({ t: e.slice(11, 19), ...tlKind(e.slice(25)) }))
@@ -473,6 +695,13 @@
       l.startsWith("baru:") ? { mark: "+", cls: "v-ok", path: l.slice(5).trim() } : { mark: "~", cls: "v-warn", path: l.split("|")[0].trim() }
     );
   });
+  let revPipe = $derived(projects.find((p) => p.name === revProj)?.pipeline || null);
+  let revLang = $derived(revFilePath ? langOf(revFilePath) : "");
+  let revHtml = $derived.by(() => {
+    if (!revFilePath || !revContent || revContent === "memuat…" || revContent.startsWith("✕")) return null;
+    return highlightCode(revContent, revFilePath);
+  });
+  let revTasks = $derived((snap?.stack || []).filter((t) => t.project === revProj).slice(-8).reverse());
   let palItems = $derived.by(() => {
     const q = palQ.trim().toLowerCase();
     const items = [
@@ -740,6 +969,33 @@
     </div>
     <div class="grid" style="margin-top:12px">
       <div class="panel">
+        {#snippet taskDetail(t)}
+          <div style="margin:2px 0 12px">
+            <div class="hint">prompt</div>
+            <pre class="dump" style="max-height:120px; margin:4px 0 10px">{t.prompt}</pre>
+            {#if filesTouched(t.id).length}
+              <div class="hint">file disentuh ({filesTouched(t.id).length})</div>
+              <div class="hint" style="margin:2px 0 10px">
+                {#each filesTouched(t.id).slice(0, 12) as f}<span class="v-ok">{f}</span>{"  "}{/each}
+                {#if filesTouched(t.id).length > 12}<span class="v-dim">+{filesTouched(t.id).length - 12} lagi</span>{/if}
+              </div>
+            {/if}
+            <div class="hint">aktivitas ({(snap.activity?.[t.id] || []).length})</div>
+            {#if !actsOf(t.id).length}
+              <div class="hint" style="margin:4px 0">belum ada — muncul saat althea memanggil tool/menyentuh file.</div>
+            {:else}
+              <div class="events" style="margin:4px 0">
+                {#each actsOf(t.id) as a}
+                  <div><span class="ttime">{a.t}</span><span class={actCls(a)}>{a.text}</span></div>
+                {/each}
+              </div>
+            {/if}
+            {#if t.note}
+              <div class="hint">hasil</div>
+              <pre class="dump" style="max-height:120px; margin:4px 0">{t.note}</pre>
+            {/if}
+          </div>
+        {/snippet}
         <h2>stack_aktif</h2>
         {#if !tasks.length}<span class="v-dim">kosong.</span>{/if}
         {#each tasks as t (t.id)}
@@ -748,13 +1004,17 @@
               {t.status === "running" ? "▶" : t.status === "waiting_approval" ? "◆" : "·"}
               {t.status}
             </span>
-            <span>{t.title}{t.project ? ` @${t.project}` : ""}</span>
+            <span>{t.title}{t.project ? ` @${t.project}` : ""}
+              {#if lastAct(t.id)}<span class="v-dim" style="font-size:12px"> — {lastAct(t.id).slice(0, 60)}</span>{/if}
+            </span>
             <span class="v-dim" style="font-size:12px">~{fmtTok(tokOf(t))}</span>
             <span style="margin-left:auto; display:flex; gap:6px">
+              <button class="ghost" onclick={() => { detailId = detailId === t.id ? null : t.id; }}>[detail]</button>
               <button class="ghost" onclick={() => openLog(t.id)}>[log]</button>
               <button class="ghost danger" onclick={() => cancel(t.id)} disabled={!!busy}>[hentikan]</button>
             </span>
           </div>
+          {#if detailId === t.id}{@render taskDetail(t)}{/if}
         {/each}
         <h2 style="margin-top:14px">riwayat</h2>
         {#if !history.length}<span class="v-dim">belum ada.</span>{/if}
@@ -763,8 +1023,12 @@
             <span class={t.status === "done" ? "v-ok" : "v-err"}>{t.status === "done" ? "✓" : "✕"} {t.status}</span>
             <span>{t.title}{t.project ? ` @${t.project}` : ""}</span>
             <span class="v-dim" style="font-size:12px">~{fmtTok(tokOf(t))}</span>
-            <button class="ghost" style="margin-left:auto" onclick={() => openLog(t.id)}>[log]</button>
+            <span style="margin-left:auto; display:flex; gap:6px">
+              <button class="ghost" onclick={() => { detailId = detailId === t.id ? null : t.id; }}>[detail]</button>
+              <button class="ghost" onclick={() => openLog(t.id)}>[log]</button>
+            </span>
           </div>
+          {#if detailId === t.id}{@render taskDetail(t)}{/if}
         {/each}
       </div>
       <div class="panel">
@@ -783,12 +1047,17 @@
     <div class="panel">
       <h2>workspace_projects</h2>
       {#if !projects.length}
-        <span class="v-dim">belum ada project — clone dari URL atau upload zip.</span>
+        <span class="v-dim">belum ada project — buat dari prompt, repo, zip, atau PRD.</span>
       {:else}
         {#each projects as p (p.name)}
           <div class="row">
             <span class="v-ok">◆ {p.name}</span>
             <span class="v-dim">[{p.stack}] {p.source}</span>
+            {#if p.pipeline}
+              <span class="pill {pipeCls(p.pipeline.status)}" title={p.pipeline.note || p.pipeline.goal}>
+                <span class="pdot"></span>{p.pipeline.status} · {p.pipeline.phases.filter((x) => x.done).length}/{p.pipeline.phases.length || "…"}
+              </span>
+            {/if}
             <span style="margin-left:auto; display:flex; gap:6px">
               <button class="ghost" onclick={() => openReview(p.name)}>[review]</button>
               <button class="ghost danger" onclick={() => delProject(p.name)} disabled={!!busy}>[hapus]</button>
@@ -796,29 +1065,216 @@
           </div>
         {/each}
       {/if}
-      <div class="grid" style="margin-top:10px">
-        <div>
-          <label for="rn">nama project baru</label>
-          <input id="rn" type="text" bind:value={newProjName} placeholder="mis. toko-online" />
-          <label for="ru">link repo (https://… / git@…)</label>
-          <input id="ru" type="text" bind:value={newRepoUrl} placeholder="https://github.com/aku/repo.git" />
-          <div class="btnrow"><button onclick={addRepo} disabled={busy === "repo" || !newProjName.trim() || !newRepoUrl.trim()}>[clone repo]</button></div>
-        </div>
-        <div>
-          <label for="un">nama project baru</label>
-          <input id="un" type="text" bind:value={uploadName} placeholder="mis. arsip-lama" />
-          <label for="uf">file zip (maks {meta?.projectMaxMb ?? 50} MB)</label>
-          <input id="uf" type="file" accept=".zip" onchange={(e) => { uploadFile = e.target.files?.[0] || null; }} />
-          <div class="btnrow"><button onclick={uploadZip} disabled={busy === "upload" || !uploadName.trim() || !uploadFile}>[upload zip]</button></div>
-        </div>
+      <div class="cardiv"></div>
+      <div class="minititle">project_baru</div>
+      <label for="pn">nama project</label>
+      <input id="pn" type="text" bind:value={projName} placeholder="mis. pos-kasir" autocomplete="off" />
+      <div class="termtabs" style="margin-top:10px" role="tablist" aria-label="sumber project">
+        {#each MODES as m}
+          <button class={projMode === m.id ? "on" : ""} onclick={() => { projMode = m.id; projErr = ""; }}>{m.label}</button>
+        {/each}
+      </div>
+      {#if projMode === "prompt"}
+        <label for="pp">ide / prompt — althea susun PRD → MVP → fitur → rilis</label>
+        <textarea id="pp" bind:value={projPrompt} placeholder="buat aplikasi pos kasir untuk warung: kasir, stok, laporan harian"></textarea>
+      {:else if projMode === "repo"}
+        <label for="pru">link repo (https://… / git@…)</label>
+        <input id="pru" type="text" bind:value={projRepo} placeholder="https://github.com/aku/repo.git" autocomplete="off" />
+        <label for="prp">prompt awal (opsional — kosong = hanya clone)</label>
+        <input id="prp" type="text" bind:value={projPrompt} placeholder="lanjutkan bangun fitur X…" />
+      {:else if projMode === "zip"}
+        <label for="pfile">file zip (maks {meta?.projectMaxMb ?? 50} MB)</label>
+        <input id="pfile" type="file" accept=".zip" onchange={(e) => { projFile = e.currentTarget.files?.[0] || null; }} />
+        <label for="pzp">prompt awal (opsional — kosong = hanya ekstrak)</label>
+        <input id="pzp" type="text" bind:value={projPrompt} placeholder="lanjutkan bangun…" />
+      {:else}
+        <label for="pfile">file PRD (.md / .txt, maks 2 MB) — langsung eksekusi MVP</label>
+        <input id="pfile" type="file" accept=".md,.markdown,.txt" onchange={(e) => { projFile = e.currentTarget.files?.[0] || null; }} />
+        <label for="ppp">goal (opsional — default: wujudkan PRD ini)</label>
+        <input id="ppp" type="text" bind:value={projPrompt} placeholder="fokus ke…" />
+      {/if}
+      <div class="btnrow">
+        <button
+          onclick={addProject}
+          disabled={busy === "proj" || !projName.trim() ||
+            (projMode === "prompt" && !projPrompt.trim()) ||
+            (projMode === "repo" && !projRepo.trim()) ||
+            ((projMode === "zip" || projMode === "prd") && !projFile)}
+        >[buat project]</button>
       </div>
       {#if projErr}<div class="err">✕ {projErr}</div>{/if}
+      {#if projMsg}<div class="hint v-ok" style="margin-top:8px">{projMsg}</div>{/if}
     </div>
 
     {#if revProj}
       <div class="panel" style="margin-top:12px">
         <h2>review {revProj}</h2>
         {#if revErr}<div class="err">✕ {revErr}</div>{/if}
+        {#if revPipe}
+          <div class="row">
+            <span class="k">pipeline</span>
+            <span class="pill {pipeCls(revPipe.status)}"><span class="pdot"></span>{revPipe.status}</span>
+            <span class="v-dim">{revPipe.note || revPipe.goal}</span>
+            <span style="margin-left:auto; display:flex; gap:6px">
+              {#if revPipe.status === "running"}
+                <button class="ghost warn" onclick={() => pipeAct(revProj, "pause")} disabled={!!busy}>[jeda]</button>
+                <button class="ghost danger" onclick={() => pipeAct(revProj, "cancel")} disabled={!!busy}>[hentikan]</button>
+              {:else if revPipe.status === "paused"}
+                <button class="ghost" onclick={() => pipeAct(revProj, "resume")} disabled={!!busy}>[lanjutkan]</button>
+                <button class="ghost danger" onclick={() => pipeAct(revProj, "cancel")} disabled={!!busy}>[hentikan]</button>
+              {:else if revPipe.status === "failed"}
+                <button class="ghost" onclick={() => pipeAct(revProj, "resume")} disabled={!!busy}>[ulangi fase]</button>
+              {/if}
+            </span>
+          </div>
+          {#each revPipe.phases as ph}
+            <div class="row">
+              <span class={ph.done ? "v-ok" : "v-dim"}>{ph.done ? "✓" : "○"}</span>
+              <span>{ph.id}</span>
+              <span class="v-dim">{ph.title}</span>
+            </div>
+          {/each}
+          <div class="cardiv"></div>
+        {/if}
+        <h2>aktivitas_althea</h2>
+        {#if !revTasks.length}
+          <span class="v-dim">belum ada tugas untuk project ini — kirim instruksi di bawah.</span>
+        {:else}
+          {#each revTasks as t (t.id)}
+            <div class="row">
+              <span class={t.status === "done" ? "v-ok" : t.status === "failed" ? "v-err" : t.status === "running" ? "v-ok" : "v-warn"}>
+                {t.status === "done" ? "✓" : t.status === "failed" ? "✕" : t.status === "running" ? "▶" : "·"} {t.status}
+              </span>
+              <span>{t.title}</span>
+              {#if t.phase}<span class="v-dim">[{t.phase}]</span>{/if}
+              <span style="margin-left:auto; display:flex; gap:6px">
+                {#if t.note}<button class="ghost" onclick={() => { showNote = showNote === t.id ? null : t.id; }}>[hasil]</button>{/if}
+                <button class="ghost" onclick={() => goLog(t.id)}>[log]</button>
+                <button class="ghost" onclick={() => { fTarget = t.id; }}>[tindak lanjut]</button>
+              </span>
+            </div>
+            {#if showNote === t.id}
+              <pre class="dump" style="max-height:160px; margin:6px 0">{t.note}</pre>
+            {/if}
+            {@const audit = summarizeToolCalls(snap?.activity?.[t.id] || [])}
+            {#if audit.length}
+              <div class="auditrow" title="ringkasan tool calls tugas ini">
+                <span class="v-dim">tool</span>
+                {#each audit as au}
+                  <span class="audititem" title={au.last || au.tool}>
+                    {au.tool} ×{au.calls + au.pending}
+                    {#if au.fail}<span class="v-err"> ✕{au.fail}</span>{/if}
+                    {#if au.pending}<span class="v-warn"> …{au.pending}</span>{/if}
+                    {#if !au.fail && !au.pending}<span class="v-ok"> ✓</span>{/if}
+                  </span>
+                {/each}
+              </div>
+            {/if}
+          {/each}
+        {/if}
+        {#if fTarget}
+          <label for="fup">tindak lanjut {fTarget} — althea kerjakan sebagai tugas baru</label>
+          <div style="display:flex; gap:8px">
+            <input id="fup" type="text" bind:value={fText} placeholder="mis. rapikan tampilan kasir, tambah tombol cetak" />
+            <button onclick={sendFollowup} disabled={busy === "fup" || !fText.trim()} style="white-space:nowrap">[kirim]</button>
+            <button class="ghost" onclick={() => { fTarget = null; fText = ""; }}>[batal]</button>
+          </div>
+        {/if}
+        <label for="ins">suruh althea — instruksi bebas untuk project ini</label>
+        <div style="display:flex; gap:8px">
+          <input id="ins" type="text" bind:value={instructText} placeholder="mis. tambahkan fitur diskon per item" />
+          <button onclick={instruct} disabled={busy === "ins" || !instructText.trim()} style="white-space:nowrap">[jalankan]</button>
+        </div>
+        <div class="cardiv"></div>
+        <h2>mcp_server</h2>
+        {#if !mcpInfo}
+          <span class="v-dim">memuat…</span>
+        {:else if mcpInfo.failed}
+          <span class="v-dim">gagal memuat daftar MCP.</span>
+        {:else if !mcpInfo.servers.length}
+          <span class="v-dim">belum ada MCP terdaftar.</span>
+        {:else}
+          {#each mcpInfo.servers as m (m.id)}
+            <div class="row">
+              <span class={m.enabled && m.runnable ? "v-ok" : m.enabled ? "v-warn" : "v-dim"}>
+                {m.enabled ? (m.runnable ? "●" : "○") : "○"} {m.id}
+              </span>
+              <span class="v-dim">{m.desc}</span>
+              {#if m.enabled && m.runnable === false}
+                <span class="v-warn">belum runnable</span>
+              {/if}
+              <span style="margin-left:auto">
+                <button class="ghost" onclick={() => toggleMcp(m.id)} disabled={mcpBusy}>[{m.enabled ? "matikan" : "aktifkan"}]</button>
+              </span>
+            </div>
+            {#if m.enabled && m.runnable === false}
+              <div class="hint">setup: {m.setupHint}</div>
+            {/if}
+          {/each}
+          <div class="hint">MCP aktif disuntik ke settings.json muse CLI saat tugas project ini jalan.</div>
+        {/if}
+        <div class="cardiv"></div>
+        <h2>preview_aplikasi</h2>
+        {#if !pvInfo}
+          <span class="v-dim">memuat…</span>
+        {:else}
+          <div class="row">
+            <span class="k">status</span>
+            {#if pvInfo.state === "running"}
+              <span class="pill v-ok"><span class="pdot"></span>jalan{pvInfo.mode === "static" ? " · statis" : ` · :${pvInfo.port}`}</span>
+            {:else if pvInfo.state === "starting"}
+              <span class="pill v-warn"><span class="pdot"></span>menyalakan…</span>
+            {:else if pvInfo.state === "failed"}
+              <span class="pill v-err"><span class="pdot"></span>gagal</span>
+            {:else}
+              <span class="pill v-dim"><span class="pdot"></span>mati</span>
+            {/if}
+            {#if pvInfo.url && pvInfo.state === "running"}
+              <a class="ghostlink" href={pvInfo.url} target="_blank" rel="noreferrer">[buka tab]</a>
+            {/if}
+            <span style="margin-left:auto; display:flex; gap:6px">
+              <button class="ghost" onclick={pvRefresh} disabled={pvBusy}>[segarkan]</button>
+              {#if pvInfo.state === "running" && pvInfo.mode === "server"}
+                <button class="ghost" onclick={() => { pvFrameKey++; }}>[muat ulang]</button>
+              {/if}
+              {#if (pvInfo.state === "running" || pvInfo.state === "starting") && pvInfo.mode !== "static"}
+                <button class="ghost danger" onclick={pvStop} disabled={pvBusy}>[hentikan]</button>
+              {/if}
+            </span>
+          </div>
+          {#if pvInfo.error}<div class="err">✕ {pvInfo.error}</div>{/if}
+          {#if pvInfo.state === "running" && pvInfo.reachable === false}
+            <div class="hint">proses jalan tapi port {pvInfo.port} tak merespons — app mungkin bind di port lain. Cek log / sesuaikan command.</div>
+          {:else if pvInfo.state === "running" && pvInfo.mode === "server"}
+            <div class="hint">iframe langsung ke 127.0.0.1:{pvInfo.port} agar path absolut app ("/assets/…") tetap jalan.</div>
+          {/if}
+          {#if pvInfo.mode !== "static" || pvInfo.state !== "running"}
+            <label for="pvcmd">command preview — dijalankan di folder project (tulis {"{port}"} bila app butuh port eksplisit)</label>
+            <div style="display:flex; gap:8px">
+              <input id="pvcmd" type="text" bind:value={pvCmd} placeholder="mis. npm run dev" />
+              <button onclick={pvStart} disabled={pvBusy || !pvCmd.trim()} style="white-space:nowrap">[jalankan]</button>
+            </div>
+            {#if !pvCmd.trim() && pvInfo.state === "stopped"}
+              <div class="hint">stack ini belum punya command default — isi dulu, mis. "go run ." atau "npm run dev".</div>
+            {/if}
+          {:else}
+            <div class="hint">project HTML statis — disajikan dari port {pvInfo.port} (origin sendiri).</div>
+          {/if}
+          {#if pvInfo.state === "running" && pvInfo.url}
+            {#key pvFrameKey}
+              <iframe class="pvframe" src={pvInfo.url} title="preview {revProj}" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+            {/key}
+          {/if}
+          {#if pvInfo.logs?.length}
+            <div class="btnrow" style="margin-top:8px">
+              <button class="ghost" onclick={() => { showPvLog = !showPvLog; }}>[log preview ({pvInfo.logs.length})]</button>
+            </div>
+            {#if showPvLog}
+              <pre class="dump logview" style="margin-top:6px">{pvInfo.logs.slice(-100).join("\n")}</pre>
+            {/if}
+          {/if}
+        {/if}
+        <div class="cardiv"></div>
         {#if revDiff}
           {#if !revDiff.repo}
             <div class="hint">Bukan repo git — diff tak tersedia. Jelajahi file di bawah.</div>
@@ -839,8 +1295,12 @@
           {/each}
         </div>
         {#if revFilePath}
-          <h2 style="margin-top:12px">{revFilePath}</h2>
-          <pre class="dump codeview">{revContent}</pre>
+          <h2 style="margin-top:12px">{revFilePath}<span class="langbadge">{revLang}</span></h2>
+          {#if revHtml}
+            <pre class="dump codeview codehl">{@html revHtml}</pre>
+          {:else}
+            <pre class="dump codeview">{revContent}</pre>
+          {/if}
         {/if}
         <div class="btnrow"><button class="ghost" onclick={closeReview}>[tutup]</button></div>
       </div>

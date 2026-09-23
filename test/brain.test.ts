@@ -64,14 +64,14 @@ describe("preseden: dashboard > env > default CLI", () => {
 });
 
 describe("argumen spawn", () => {
-  it("gaya exec: flags model/effort sebelum prompt", () => {
+  it("gaya exec: flags model/effort + trust + headless + json sebelum prompt", () => {
     const b = effectiveBrain({ model: "m1", effort: "high" }, ENV);
     assert.deepEqual(brainArgs("KERJAKAN", b),
-      ["exec", "--model", "m1", "--reasoning-effort", "high", "KERJAKAN"]);
+      ["exec", "--model", "m1", "--reasoning-effort", "high", "--trust-workspace", "--user-input-auto-resolve", "--disable-approval", "--json", "KERJAKAN"]);
   });
-  it("gaya exec: default yang kosong dihilangkan", () => {
+  it("gaya exec: default yang kosong dihilangkan, trust selalu ada", () => {
     const b = effectiveBrain({ model: "", effort: "" }, ENV);
-    assert.deepEqual(brainArgs("KERJAKAN", b), ["exec", "KERJAKAN"]);
+    assert.deepEqual(brainArgs("KERJAKAN", b), ["exec", "--trust-workspace", "--user-input-auto-resolve", "--disable-approval", "--json", "KERJAKAN"]);
   });
   it("gaya lama (subcommand kosong): tetap -p tanpa flags", () => {
     const b = effectiveBrain(

@@ -2,17 +2,19 @@
 // Urutan tiap tick: telegram → approval? → tidur? → limit? → kerjakan puncak stack.
 import { existsSync } from "node:fs";
 import { config } from "./config.js";
-import { loadState, saveState, logEvent, appendLog } from "./state.js";
+import { loadState, saveState, logEvent, appendLog, appendActivity } from "./state.js";
 import { addRun, emptyUsage } from "./tokens.js";
-import { peek, markDone, markFailed, requestApproval, resolveApproval } from "./workflow.js";
+import { peek, markDone, markFailed, noteTimeout, requestApproval, resolveApproval } from "./workflow.js";
 import { processEscalations } from "./escalation.js";
 import { isSleeping, forceWake } from "./sleeper.js";
 import { runClaude, enterLimitCooldown, limitDue, brainSummary, effectiveBrain } from "./claude.js";
 import { checkBrain } from "./metrics.js";
 import { projectDir } from "./projects.js";
+import { advancePipeline, pipelineOnFail } from "./pipeline.js";
 import { pollTelegram, notifyAdmins, askApproval } from "./telegram.js";
 import { startServer } from "./server.js";
 import { buildReport } from "./report.js";
+import { syncProjectMcps } from "./mcp.js";
 
 const state = loadState(config.statePath);
 const save = () => saveState(config.statePath, state);
@@ -41,6 +43,7 @@ async function tick(): Promise<void> {
       await askApproval(a.id, a.title, a.question, config.approvalTelegramMinutes);
     } else {
       resolveApproval(state, a.id, act.ok, act.reason, "auto");
+      if (!act.ok) pipelineOnFail(state, a.id); // auto-tolak tugas fase → pipeline gagal
       forceWake(state, `auto-keputusan ${a.id}`);
       save();
       await notifyAdmins(
@@ -101,6 +104,29 @@ async function tick(): Promise<void> {
     appendLog(state, top.id, line);
     if (Date.now() - lastLogSave > 2000) { lastLogSave = Date.now(); save(); }
   };
+  const pushActivity = (a: { kind: string; text: string; tool?: string; ok?: boolean }) => {
+    appendActivity(state, top.id, a.kind, a.text, { tool: a.tool, ok: a.ok });
+    if (Date.now() - lastLogSave > 2000) { lastLogSave = Date.now(); save(); }
+  };
+  // MCP project → suntik ke settings.json CLI sebelum spawn (gagal = lanjut tanpa MCP).
+  if (top.project) {
+    try {
+      const proj = state.projects.find((p) => p.name === top.project);
+      const ids = (proj?.mcps || []).filter((id) => typeof id === "string");
+      if (ids.length) {
+        const mr = syncProjectMcps(ids);
+        if (mr.changed) logEvent(state, `mcp sync @${top.project}: ${ids.join(",")}`);
+        if (!mr.ok) logEvent(state, `mcp sync @${top.project} gagal: ${mr.error} (lanjut tanpa MCP)`);
+        else for (const st of mr.status) {
+          if (st.enabled && st.runnable === false) {
+            logEvent(state, `mcp @${top.project}: "${st.id}" belum runnable — ${st.setupHint}`);
+          }
+        }
+      }
+    } catch (e) {
+      logEvent(state, `mcp sync @${top.project} gagal: ${String(e)} (lanjut tanpa MCP)`);
+    }
+  }
   // Mode graph: plan→implement→review; hasil dinormalisasi ke bentuk runClaude
   // agar limit/IZIN/done/failed ditangani kode yang sama di bawah.
   let graphNote = "";
@@ -113,18 +139,20 @@ async function tick(): Promise<void> {
       autoApprove: config.claudeDryRun,
       onLine: pushLine,
       onEvent: (m) => logEvent(state, `${top.id} ${m}`),
+      onActivity: pushActivity,
     });
     graphIn = g.inputChars;
-    if (g.cancelled) return { ok: false, output: "", hitLimit: false, retryAfterMs: null, cancelled: true };
-    if (g.hitLimit) return { ok: false, output: "", hitLimit: true, retryAfterMs: g.retryAfterMs, cancelled: false };
+    if (g.cancelled) return { ok: false, output: "", hitLimit: false, retryAfterMs: null, cancelled: true, timedOut: false };
+    if (g.hitLimit) return { ok: false, output: "", hitLimit: true, retryAfterMs: g.retryAfterMs, cancelled: false, timedOut: false };
+    if (g.timedOut) return { ok: false, output: "", hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: true };
     if (!g.approved) {
-      return { ok: false, output: `review tak lolos ${config.graphMaxRounds} ronde. ${g.note}`, hitLimit: false, retryAfterMs: null, cancelled: false };
+      return { ok: false, output: `review tak lolos ${config.graphMaxRounds} ronde. ${g.note}`, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false };
     }
     graphNote = g.note;
-    return { ok: true, output: g.outputs.join("\n"), hitLimit: false, retryAfterMs: null, cancelled: false };
+    return { ok: true, output: g.outputs.join("\n"), hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false };
   };
   try {
-    const r = config.graphEnabled ? await runGraphMode() : await runClaude(top.prompt, cwd, pushLine);
+    const r = config.graphEnabled ? await runGraphMode() : await runClaude(top.prompt, cwd, pushLine, pushActivity);
     // Catat pemakaian (juga untuk run yang dibatalkan/limit — token tetap terpakai).
     const charsIn = config.graphEnabled ? graphIn : [...top.prompt].length;
     const charsOut = [...r.output].length;
@@ -133,7 +161,20 @@ async function tick(): Promise<void> {
     addRun(state.usage, charsIn, charsOut);
     save(); // pastikan log lengkap tersimpan saat run selesai
     if (r.cancelled) return; // kill-switch: state sudah diurus endpoint cancel
-    if (r.hitLimit) {
+    if (r.timedOut) {
+      const action = noteTimeout(state, top.id, config.taskMaxAttempts);
+      save();
+      if (action === "retry") {
+        await notifyAdmins(
+          `⏱ TIMEOUT ${config.claudeTimeoutSeconds} dtk\n"${top.title}" (${top.id}) diulang otomatis — percobaan ${top.attempts}/${config.taskMaxAttempts}. File yang sudah ditulis aman.`
+        );
+      } else {
+        const pf = pipelineOnFail(state, top.id);
+        save();
+        await notifyAdmins(`❌ Gagal: ${top.title}\nTimeout ${config.taskMaxAttempts}× — naikkan CLAUDE_TIMEOUT_SECONDS bila tugas memang besar.` +
+          (pf ? `\nPipeline "${pf.project}" terhenti di fase ${pf.phase}.` : ""));
+      }
+    } else if (r.hitLimit) {
       top.status = "queued"; // JANGAN done/failed: prompt tersimpan → auto-lanjut
       const until = enterLimitCooldown(state, r.retryAfterMs);
       save();
@@ -149,12 +190,25 @@ async function tick(): Promise<void> {
         save();
       } else {
         markDone(state, top.id, (graphNote || r.output).slice(0, 1000));
+        // Tugas fase pipeline → dorong fase berikut (atau tamatkan pipeline).
+        const adv = advancePipeline(state, top, r.output);
         save();
+        if (adv?.pushed) {
+          await notifyAdmins(
+            `🔁 PIPELINE ${top.project}: fase ${adv.from} selesai → lanjut ${adv.to} (${adv.pushed.title}).`
+          );
+        } else if (adv?.finished) {
+          await notifyAdmins(
+            `🚀 PIPELINE SELESAI\nProject "${top.project}" tamat seluruh fase.\nWaktunya review: dashboard → projects → review.`
+          );
+        }
       }
     } else {
       markFailed(state, top.id, r.output.slice(0, 500));
+      const pf = pipelineOnFail(state, top.id);
       save();
-      await notifyAdmins(`❌ Gagal: ${top.title}\n${r.output.slice(0, 500)}`);
+      await notifyAdmins(`❌ Gagal: ${top.title}\n${r.output.slice(0, 500)}` +
+        (pf ? `\nPipeline "${pf.project}" terhenti di fase ${pf.phase}.` : ""));
     }
   } finally {
     working = false;

@@ -58,7 +58,13 @@ function register(s: AltheaState, name: string, source: string): Project {
   const stack = detectStack(dir);
   const now = new Date().toISOString();
   const prev = s.projects.findIndex((p) => p.name === name);
-  const proj: Project = { name, source, stack, addedAt: prev >= 0 ? s.projects[prev].addedAt : now };
+  const prevProj = prev >= 0 ? s.projects[prev] : null;
+  const proj: Project = {
+    name, source, stack, addedAt: prevProj ? prevProj.addedAt : now,
+    ...(prevProj?.pipeline ? { pipeline: prevProj.pipeline } : {}),
+    ...(prevProj?.mcps ? { mcps: prevProj.mcps } : {}),
+    ...(prevProj?.previewCmd ? { previewCmd: prevProj.previewCmd } : {}),
+  };
   if (prev >= 0) s.projects[prev] = proj;
   else s.projects.push(proj);
   logEvent(s, `project +${name} [${stack}] (${source.slice(0, 80)})`);
@@ -136,6 +142,49 @@ export function addFromZip(
   return { ok: true, project: register(s, name, `zip:${fileName}`.slice(0, 120)) };
 }
 
+/** Git init + commit awal, best-effort (tak pernah throw): agar diff/review langsung berguna. */
+export function ensureGitRepo(dir: string): Promise<void> {
+  const run = (args: string[]) => new Promise<void>((resolve) => {
+    execFile(config.gitBin, args, { cwd: dir, timeout: 15_000 }, () => resolve());
+  });
+  return (async () => {
+    await run(["init", "-q"]);
+    await run(["add", "-A"]);
+    await run(["-c", "user.name=althea", "-c", "user.email=althea@local", "commit", "-qm", "init"]);
+  })();
+}
+
+/** Buat project kosong dari nama saja (folder + README stub + git init). */
+export async function addBlank(
+  s: AltheaState, name: string, goal = ""
+): Promise<{ ok: boolean; error?: string; project?: Project }> {
+  const dir = projectDir(name);
+  if (!dir) return { ok: false, error: "nama project tidak valid" };
+  if (existsSync(dir)) return { ok: false, error: `folder "${name}" sudah ada` };
+  mkdirSync(dir, { recursive: true });
+  const g = goal.trim().slice(0, 500);
+  writeFileSync(join(dir, "README.md"), `# ${name}\n\n${g ? `> ${g}\n\n` : ""}*Dibuat oleh Althea.*\n`);
+  await ensureGitRepo(dir);
+  return { ok: true, project: register(s, name, "blank") };
+}
+
+/** Buat project dari file PRD user (disimpan sebagai PRD.md). */
+export async function addPrd(
+  s: AltheaState, name: string, fileName: string, buf: Buffer
+): Promise<{ ok: boolean; error?: string; project?: Project }> {
+  const dir = projectDir(name);
+  if (!dir) return { ok: false, error: "nama project tidak valid" };
+  if (existsSync(dir)) return { ok: false, error: `folder "${name}" sudah ada` };
+  if (buf.includes(0)) return { ok: false, error: "bukan file teks" };
+  const clean = buf.toString("utf8").replace(/^\uFEFF/, "").trim();
+  if (!clean) return { ok: false, error: "isi PRD kosong" };
+  if (clean.length > 200_000) return { ok: false, error: "PRD melebihi 200 KB" };
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "PRD.md"), clean.slice(0, 200_000));
+  await ensureGitRepo(dir);
+  return { ok: true, project: register(s, name, `prd:${fileName}`.slice(0, 120)) };
+}
+
 /** Hapus project (folder + registry). */
 export function removeProject(s: AltheaState, name: string): { ok: boolean; error?: string } {
   const dir = projectDir(name);
@@ -146,7 +195,7 @@ export function removeProject(s: AltheaState, name: string): { ok: boolean; erro
   return { ok: true };
 }
 
-const SKIP_DIRS = new Set([".git", "node_modules", ".svn", "__pycache__", "dist", "build"]);
+const SKIP_DIRS = new Set([".git", "node_modules", ".svn", "__pycache__", "dist", "build", ".next", "coverage"]);
 
 export interface FileEntry { path: string; size: number; }
 
@@ -178,6 +227,76 @@ export function listFiles(name: string, max = 200): { ok: boolean; error?: strin
   };
   walk("");
   return { ok: true, files: out };
+}
+
+/** Foto file dir (rel → size+mtime), lewati folder berat, maks 500 entri. */
+export function snapshotFiles(dir: string, max = 500): Map<string, { size: number; mtimeMs: number }> {
+  const out = new Map<string, { size: number; mtimeMs: number }>();
+  const walk = (rel: string): void => {
+    if (out.size >= max) return;
+    let entries: string[];
+    try {
+      entries = readdirSync(join(dir, rel));
+    } catch { return; }
+    for (const e of entries.sort()) {
+      if (out.size >= max) return;
+      const relPath = rel ? `${rel}/${e}` : e;
+      let st;
+      try {
+        st = statSync(join(dir, relPath));
+      } catch { continue; }
+      if (st.isDirectory()) {
+        if (!SKIP_DIRS.has(e)) walk(relPath);
+      } else if (st.isFile()) {
+        out.set(relPath, { size: st.size, mtimeMs: st.mtimeMs });
+      }
+    }
+  };
+  walk("");
+  return out;
+}
+
+export interface FileWatch {
+  stop: () => void;
+}
+
+/**
+ * Pantau dir selama run: laporkan file baru/berubah (sekali per path,
+ * maks 50/run). Polling berantai agar tak tumpang-tindih di fs lambat.
+ */
+export function startFileWatch(
+  dir: string,
+  onChange: (kind: "file", text: string) => void,
+  intervalMs = 3000,
+): FileWatch {
+  let before = snapshotFiles(dir);
+  const emitted = new Set<string>();
+  let count = 0;
+  let dead = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const tick = () => {
+    if (dead) return;
+    try {
+      const after = snapshotFiles(dir);
+      for (const [rel, cur] of after) {
+        if (count >= 50) break;
+        const prev = before.get(rel);
+        if (!prev && !emitted.has(`+${rel}`)) {
+          emitted.add(`+${rel}`);
+          count += 1;
+          onChange("file", `baru: ${rel}`);
+        } else if (prev && (prev.mtimeMs !== cur.mtimeMs || prev.size !== cur.size) && !emitted.has(`~${rel}`)) {
+          emitted.add(`~${rel}`);
+          count += 1;
+          onChange("file", `ubah: ${rel}`);
+        }
+      }
+      before = after;
+    } catch { /* abaikan — watcher tak boleh menggagalkan run */ }
+    if (!dead) timer = setTimeout(tick, intervalMs);
+  };
+  timer = setTimeout(tick, intervalMs);
+  return { stop: () => { dead = true; if (timer) clearTimeout(timer); } };
 }
 
 /** Isi file teks project (maks 200 KB; tolak biner & traversal). */

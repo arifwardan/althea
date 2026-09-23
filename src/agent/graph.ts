@@ -19,8 +19,12 @@ export class LimitSignal extends Error {
 /** Kill-switch di tengah graph → state sudah diurus endpoint cancel. */
 export class CancelledSignal extends Error {}
 
+/** Timer Althea membunuh satu node → driver antre-ulang seluruh tugas. */
+export class TimeoutSignal extends Error {}
+
 export type RunFn = (
-  prompt: string, cwd?: string, onLine?: (line: string) => void
+  prompt: string, cwd?: string, onLine?: (line: string) => void,
+  onActivity?: (a: { kind: string; text: string; tool?: string; ok?: boolean }) => void,
 ) => Promise<ClaudeResult>;
 
 export interface GraphProgress { plan?: string; iteration?: number; feedback?: string }
@@ -35,6 +39,7 @@ export interface GraphOpts {
   getTree?: () => string; // default: daftar file project
   onLine?: (line: string) => void;
   onEvent?: (msg: string) => void;
+  onActivity?: (a: { kind: string; text: string; tool?: string; ok?: boolean }) => void;
   onProgress?: (g: GraphProgress) => void; // dipanggil tiap node (agar resume tak mengulang)
 }
 
@@ -46,6 +51,7 @@ export interface GraphResult {
   hitLimit: boolean;
   retryAfterMs: number | null;
   cancelled: boolean;
+  timedOut: boolean;
   approved: boolean;
 }
 
@@ -106,6 +112,7 @@ export function parseReview(output: string): { verdict: "approve" | "fix"; feedb
 function throwIfSpecial(r: ClaudeResult): void {
   if (r.cancelled) throw new CancelledSignal();
   if (r.hitLimit) throw new LimitSignal(r.retryAfterMs);
+  if (r.timedOut) throw new TimeoutSignal();
 }
 
 export function buildGraph(opts: {
@@ -167,7 +174,7 @@ export async function runGraphTask(o: GraphOpts): Promise<GraphResult> {
   let inputChars = 0;
   const run: RunFn = async (prompt, cwd, onLine) => {
     inputChars += [...prompt].length;
-    return inner(prompt, cwd, onLine);
+    return inner(prompt, cwd, onLine, o.onActivity);
   };
   const tree = o.getTree
     ? o.getTree()
@@ -214,14 +221,18 @@ export async function runGraphTask(o: GraphOpts): Promise<GraphResult> {
       hitLimit: false,
       retryAfterMs: null,
       cancelled: false,
+      timedOut: false,
       approved: final.approved,
     };
   } catch (e) {
     if (e instanceof CancelledSignal) {
-      return { ok: false, outputs: [], note: "", inputChars, hitLimit: false, retryAfterMs: null, cancelled: true, approved: false };
+      return { ok: false, outputs: [], note: "", inputChars, hitLimit: false, retryAfterMs: null, cancelled: true, timedOut: false, approved: false };
     }
     if (e instanceof LimitSignal) {
-      return { ok: false, outputs: [], note: "", inputChars, hitLimit: true, retryAfterMs: e.retryAfterMs, cancelled: false, approved: false };
+      return { ok: false, outputs: [], note: "", inputChars, hitLimit: true, retryAfterMs: e.retryAfterMs, cancelled: false, timedOut: false, approved: false };
+    }
+    if (e instanceof TimeoutSignal) {
+      return { ok: false, outputs: [], note: "", inputChars, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: true, approved: false };
     }
     throw e;
   }

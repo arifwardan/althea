@@ -10,7 +10,7 @@ import { defaultState } from "../src/state.js";
 import {
   validName, validRepoUrl, projectDir, detectStack, safeZipEntries,
   addFromZip, addFromRepo, removeProject, listProjects,
-  listFiles, readProjectFile, projectDiff,
+  listFiles, readProjectFile, projectDiff, snapshotFiles, startFileWatch,
 } from "../src/projects.js";
 import { parseMultipart } from "../src/server.js";
 
@@ -154,5 +154,33 @@ describe("parseMultipart", () => {
     assert.equal(fields.name, "demo");
     assert.equal(files.length, 1);
     assert.deepEqual(files[0].data, Buffer.from([0x50, 0x4b, 0x00, 0xff, 0x41]));
+  });
+});
+
+describe("file watcher", () => {
+  it("snapshot lewati folder berat (.next, node_modules)", () => {
+    mkdirSync(join(tmp, "w", ".next"), { recursive: true });
+    mkdirSync(join(tmp, "w", "node_modules"), { recursive: true });
+    writeFileSync(join(tmp, "w", ".next", "x.js"), "1");
+    writeFileSync(join(tmp, "w", "a.txt"), "1");
+    const snap = snapshotFiles(join(tmp, "w"));
+    assert.ok(snap.has("a.txt"));
+    assert.ok(![...snap.keys()].some((k) => k.includes(".next") || k.includes("node_modules")));
+  });
+  it("startFileWatch laporkan baru/ubah sekali per path", async () => {
+    const dir = join(tmp, "ww");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ada.txt"), "1");
+    const got: string[] = [];
+    const w = startFileWatch(dir, (_k, t) => got.push(t), 20);
+    try {
+      writeFileSync(join(dir, "baru.txt"), "2");
+      writeFileSync(join(dir, "ada.txt"), "222");
+      await new Promise((r) => setTimeout(r, 120));
+    } finally {
+      w.stop();
+    }
+    assert.ok(got.some((t) => t === "baru: baru.txt"), JSON.stringify(got));
+    assert.ok(got.some((t) => t === "ubah: ada.txt"), JSON.stringify(got));
   });
 });

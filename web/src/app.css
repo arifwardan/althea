@@ -219,7 +219,7 @@ pre.dump {
 .events div:last-child { color: var(--txt); border-bottom: 0; }
 
 /* ——— forms & buttons ——— */
-input[type="text"], input[type="password"], input[type="number"], input[type="file"], select {
+input[type="text"], input[type="password"], input[type="number"], input[type="file"], select, textarea {
   background: #060a08;
   border: 1px solid var(--line);
   color: var(--txt);
@@ -230,7 +230,8 @@ input[type="text"], input[type="password"], input[type="number"], input[type="fi
   width: 100%;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
-input:focus, select:focus { outline: none; border-color: var(--grn-deep); box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15); }
+textarea { min-height: 76px; resize: vertical; font-family: var(--mono); line-height: 1.6; }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--grn-deep); box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15); }
 label { display: block; color: var(--dim); font-size: 12px; margin: 10px 0 4px; }
 
 button {
@@ -360,6 +361,61 @@ button.ghost.danger:hover:not(:disabled) { background: rgba(242, 85, 90, 0.12); 
 .treerow:hover { background: rgba(52, 211, 153, 0.07); }
 .treerow.sel { background: rgba(52, 211, 153, 0.14); color: #eafff3; }
 .codeview { max-height: 420px; font-size: 12.5px; }
+.auditrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--dim);
+  padding: 4px 0 8px 4px;
+}
+.audititem { white-space: nowrap; }
+.pvframe {
+  width: 100%;
+  height: 480px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--ink);
+  margin-top: 8px;
+}
+.ghostlink { color: var(--dim); font-size: 13px; text-decoration: none; }
+.ghostlink:hover { color: var(--txt); }
+.langbadge {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--grn);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 1px 9px;
+  margin-left: 8px;
+  vertical-align: middle;
+  letter-spacing: 0.06em;
+}
+/* ——— code highlight: nomor baris + warna token (tema terminal) ——— */
+.codehl { counter-reset: cl; padding: 10px 0; }
+.codehl .cline { display: block; min-height: 1.6em; padding: 0 14px 0 3.8em; position: relative; }
+.codehl .cline::before {
+  content: counter(cl);
+  counter-increment: cl;
+  position: absolute;
+  left: 0;
+  width: 2.8em;
+  text-align: right;
+  color: var(--faint);
+  user-select: none;
+}
+.codehl .cline:hover { background: rgba(52, 211, 153, 0.05); }
+.tok-kw { color: var(--grn-hi); font-weight: 600; }
+.tok-str { color: #f2c979; }
+.tok-num { color: #ffa86b; }
+.tok-fn { color: #5eead4; }
+.tok-type { color: #e8f5ee; font-weight: 600; }
+.tok-tag { color: var(--grn-hi); font-weight: 600; }
+.tok-attr { color: #a9e5c0; }
+.tok-com { color: var(--faint); font-style: italic; }
 
 /* ——— timeline ——— */
 .timeline div { display: flex; gap: 10px; align-items: baseline; padding: 4px 0 4px 2px; position: relative; font-size: 13px; }

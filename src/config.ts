@@ -25,7 +25,7 @@ function num(name: string, dflt: number): number {
 }
 
 export const config = {
-  port: num("PORT", 3000),
+  port: num("PORT", 9999),
   host: process.env.HOST || "127.0.0.1",
   statePath: process.env.STATE_PATH || "./data/state.json",
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || "",
@@ -41,7 +41,8 @@ export const config = {
   brainModel: (process.env.BRAIN_MODEL || "").trim(),
   brainEffort: (process.env.BRAIN_EFFORT || "").trim().toLowerCase(),
   claudeResetHours: num("CLAUDE_RESET_HOURS", 5) || 5,
-  claudeTimeoutSeconds: num("CLAUDE_TIMEOUT_SECONDS", 600) || 600,
+  claudeTimeoutSeconds: num("CLAUDE_TIMEOUT_SECONDS", 1800) || 1800,
+  taskMaxAttempts: num("TASK_MAX_ATTEMPTS", 3) || 3,
   claudeDryRun: process.env.CLAUDE_DRY_RUN === "1",
   loopSeconds: num("LOOP_SECONDS", 15) || 15,
   reportEveryHours: num("REPORT_EVERY_HOURS", 6),
@@ -54,12 +55,15 @@ export const config = {
   sessionDays: num("SESSION_DAYS", 7) || 7,
   // Workspace: rumah semua project (tambah via link repo / upload zip).
   workspaceDir: process.env.WORKSPACE_DIR || "./workspace",
+  previewBasePort: num("PREVIEW_BASE_PORT", 9111), // alokasi port preview 9111–9200
   projectMaxMb: num("PROJECT_MAX_MB", 50) || 50,
   gitBin: process.env.GIT_BIN || "git",
   gitTimeoutSeconds: num("GIT_TIMEOUT_SECONDS", 180) || 180,
   // Agen LangGraph: plan→implement→review loop. 0 = mode single-shot lama.
   graphEnabled: process.env.GRAPH_ENABLED !== "0",
   graphMaxRounds: num("GRAPH_MAX_ROUNDS", 3) || 3,
+  // Pipeline project: maks ronde fase fitur (tiap ronde = 1 tugas implementasi).
+  pipelineFeatureRounds: num("PIPELINE_FEATURE_ROUNDS", 3) || 3,
 };
 
 export const resetMs = () => config.claudeResetHours * 3600_000;

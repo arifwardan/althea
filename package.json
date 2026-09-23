@@ -10,7 +10,7 @@
     "build": "npm run build:web && tsc -p tsconfig.json",
     "build:web": "vite build",
     "check": "tsc --noEmit -p tsconfig.json",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy node --import tsx --test test/*.test.ts"
   },
   "engines": {
     "node": ">=20"

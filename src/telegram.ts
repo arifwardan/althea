@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import type { AltheaState } from "./state.js";
 import { logEvent } from "./state.js";
 import { pushTask, resolveApproval, cancelTask, stackSummary } from "./workflow.js";
+import { pipelineOnFail, pipelineOnCancel } from "./pipeline.js";
 import { killRunning } from "./claude.js";
 import { goSleep, forceWake, isSleeping } from "./sleeper.js";
 import { buildReport } from "./report.js";
@@ -110,6 +111,7 @@ async function handleCommand(s: AltheaState, chatId: number, text: string, save:
       const id = rest[0] || "";
       const alasan = rest.slice(1).join(" ") || "ditolak via Telegram";
       const ok = resolveApproval(s, id, false, alasan, "admin-telegram");
+      if (ok) pipelineOnFail(s, id);
       save();
       return ok ? `⛔ ${id} ditolak.` : `ID ${id} tidak ditemukan.`;
     }
@@ -117,7 +119,10 @@ async function handleCommand(s: AltheaState, chatId: number, text: string, save:
       const id = rest[0] || "";
       killRunning();
       const ok = cancelTask(s, id, "dibatalkan via Telegram");
-      if (ok) forceWake(s, `batal ${id}`);
+      if (ok) {
+        pipelineOnCancel(s, id);
+        forceWake(s, `batal ${id}`);
+      }
       save();
       return ok ? `🛑 ${id} dibatalkan.` : `ID ${id} tidak aktif.`;
     }
@@ -144,6 +149,7 @@ export async function pollTelegram(s: AltheaState, save: () => void): Promise<vo
         if (aksi === "ok" || aksi === "no") {
           const ok = resolveApproval(s, id, aksi === "ok", aksi === "ok" ? "tombol setuju" : "tombol tolak", "admin-telegram");
           if (ok && aksi === "ok") forceWake(s, `approval ${id}`);
+          if (ok && aksi === "no") pipelineOnFail(s, id);
           save();
           await answerCallback(u.callback_query.id, ok ? (aksi === "ok" ? "Disetujui." : "Ditolak.") : "ID tidak ada.");
           if (chatId) await tgSend(String(chatId), ok ? (aksi === "ok" ? `✅ ${id} lanjut.` : `⛔ ${id} ditolak.`) : "ID tidak dikenal.");

@@ -29,6 +29,19 @@ export function pushTask(
   return t;
 }
 
+/** Tindak lanjut atas tugas lama: project diwarisi, note menaut ke induk. */
+export function pushFollowup(s: AltheaState, parentId: string, prompt: string): StackTask | null {
+  const parent = s.stack.find((x) => x.id === parentId);
+  if (!parent || !prompt.trim()) return null;
+  return pushTask(
+    s,
+    `lanjutan: ${parent.title}`.slice(0, 120),
+    prompt.trim(),
+    `lanjutan ${parentId}`,
+    parent.project,
+  );
+}
+
 export function peek(s: AltheaState): StackTask | undefined {
   // Puncak = tugas aktif teratas yang belum done/failed.
   for (let i = s.stack.length - 1; i >= 0; i--) {
@@ -56,6 +69,23 @@ export function markFailed(s: AltheaState, id: string, note = ""): void {
   t.updatedAt = new Date().toISOString();
   if (note) t.note = note;
   logEvent(s, `failed ${id} ${note}`.slice(0, 300));
+}
+
+/**
+ * Catat timeout satu eksekusi: antre-ulang selama attempts < maks (file yang
+ * sudah ditulis aman di cwd → run berikut melanjutkan), else gagalkan.
+ */
+export function noteTimeout(s: AltheaState, id: string, maxAttempts: number): "retry" | "fail" {
+  const t = s.stack.find((x) => x.id === id);
+  if (!t) return "fail";
+  if (t.attempts < maxAttempts) {
+    t.status = "queued";
+    t.updatedAt = new Date().toISOString();
+    logEvent(s, `timeout ${id} → antre ulang (${t.attempts}/${maxAttempts})`);
+    return "retry";
+  }
+  markFailed(s, id, `timeout ${maxAttempts}× — naikkan CLAUDE_TIMEOUT_SECONDS bila tugas memang besar`);
+  return "fail";
 }
 
 /** Minta izin: tugas tetap di puncak, engine berhenti sampai approve/reject. */

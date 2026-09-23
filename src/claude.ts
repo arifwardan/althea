@@ -4,6 +4,8 @@ import { spawn } from "node:child_process";
 import { config, resetMs } from "./config.js";
 import type { AltheaState } from "./state.js";
 import { logEvent } from "./state.js";
+import { createExecStream, type StreamActivity } from "./execstream.js";
+import { startFileWatch } from "./projects.js";
 
 export interface ClaudeResult {
   ok: boolean;
@@ -11,6 +13,7 @@ export interface ClaudeResult {
   hitLimit: boolean;
   retryAfterMs: number | null; // waktu tunggu eksplisit dari pesan limit, jika ada
   cancelled: boolean; // true bila dihentikan via kill-switch (state sudah diurus pemanggil)
+  timedOut: boolean; // true bila dibunuh timer internal (bukan kill-switch)
 }
 
 // Proses Muse yang sedang jalan (maks 1; loop engine serial).
@@ -98,6 +101,16 @@ export function brainArgs(prompt: string, b: EffectiveBrain = effectiveBrain()):
   const args = [b.subcommand];
   if (b.model) args.push("--model", b.model);
   if (b.effort) args.push("--reasoning-effort", b.effort);
+  // Workspace Althea milik sendiri → selalu trusted (tanpa ini delegasi subagen
+  // mati: "Agent delegation unavailable: workspace is untrusted").
+  args.push("--trust-workspace");
+  // Headless: jangan gantung menunggu input interaktif (izin lewat baris IZIN:).
+  args.push("--user-input-auto-resolve");
+  // Headless tak bisa menjawab approval → tanpa ini run macet di human_pending
+  // sampai timeout. Sandbox filesystem/network tetap aktif.
+  args.push("--disable-approval");
+  // Stream event JSONL: nama tool + jawaban streaming (diterjemah ExecStream).
+  args.push("--json");
   args.push(prompt);
   return args;
 }
@@ -150,56 +163,100 @@ export function parseRetryAfter(text: string): number | null {
 }
 
 export function runClaude(
-  prompt: string, cwd?: string, onLine?: (line: string) => void
+  prompt: string, cwd?: string, onLine?: (line: string) => void,
+  onActivity?: (a: StreamActivity) => void,
 ): Promise<ClaudeResult> {
   if (config.claudeDryRun) {
     const line = `[DRY-RUN ${brainSummary()}${cwd ? ` @${cwd}` : ""}] ${prompt.slice(0, 500)}`;
     if (onLine) onLine(line);
-    return Promise.resolve({ ok: true, output: line, hitLimit: false, retryAfterMs: null, cancelled: false });
+    return Promise.resolve({ ok: true, output: line, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false });
   }
   return new Promise((resolve) => {
     const brain = effectiveBrain();
     const child = spawn(brain.bin, brainArgs(prompt, brain), {
-      timeout: config.claudeTimeoutSeconds * 1000,
       shell: false,
       ...(cwd ? { cwd } : {}),
     });
     const ref = { child, killed: false };
     active = ref;
+    // Timer manual (bukan opsi spawn): agar timeout terdeteksi pasti dan
+    // dibedakan dari kill-switch — pemanggil bisa antre-ulang otomatis.
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGTERM"); } catch { /* sudah mati */ }
+      setTimeout(() => {
+        try { if (!child.killed) child.kill("SIGKILL"); } catch { /* abaikan */ }
+      }, 10_000);
+    }, config.claudeTimeoutSeconds * 1000);
+    // Pantau file project selama run (jalan tanpa project → tanpa watcher).
+    const watch = cwd && onActivity ? startFileWatch(cwd, (kind, text) => onActivity({ kind, text })) : null;
     const finish = (r: ClaudeResult) => {
+      clearTimeout(timer);
+      watch?.stop();
       if (active === ref) active = null;
       resolve(r);
     };
-    let out = "";
-    let err = "";
+    // Stream JSONL diterjemah: baris ramah → onLine, tool → onActivity,
+    // potongan jawaban → transkrip (pengganti output mentah).
+    const stream = createExecStream();
     let rest = "";
+    let textRest = "";
+    const emitText = (t: string) => {
+      const buf = textRest + t;
+      const parts = buf.split("\n");
+      textRest = parts.pop() || "";
+      for (const ln of parts) {
+        if (onLine) onLine(ln.slice(0, 2000));
+      }
+    };
     const feed = (d: unknown) => {
       const chunk = rest + String(d);
       const parts = chunk.split("\n");
       rest = parts.pop() || "";
       for (const line of parts) {
-        if (onLine) onLine(line.slice(0, 2000));
+        const r = stream.push(line);
+        for (const l of r.log) {
+          if (onLine) onLine(l.slice(0, 2000));
+        }
+        for (const a of r.activities) {
+          if (onActivity) onActivity(a);
+        }
+        if (r.text) emitText(r.text);
       }
     };
-    child.stdout.on("data", (d) => { out += String(d); feed(d); });
-    child.stderr.on("data", (d) => { err += String(d); feed(d); });
+    child.stdout.on("data", feed);
+    child.stderr.on("data", feed);
     child.on("error", (e) => {
-      finish({ ok: false, output: spawnErrorNote(brain.bin, e), hitLimit: false, retryAfterMs: null, cancelled: false });
+      finish({ ok: false, output: spawnErrorNote(brain.bin, e), hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false });
     });
     child.on("close", (code) => {
-      if (rest && onLine) onLine(rest.slice(0, 2000));
+      if (rest) {
+        const r = stream.push(rest);
+        for (const l of r.log) {
+          if (onLine) onLine(l.slice(0, 2000));
+        }
+        if (r.text) emitText(r.text);
+      }
+      if (textRest && onLine) onLine(textRest.slice(0, 2000));
       if (ref.killed) {
-        finish({ ok: false, output: "DIBATALKAN oleh admin (kill-switch)", hitLimit: false, retryAfterMs: null, cancelled: true });
+        finish({ ok: false, output: "DIBATALKAN oleh admin (kill-switch)", hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false });
         return;
       }
-      const combined = `${out}\n${err}`.slice(0, 8000);
-      const hitLimit = detectLimit(combined);
+      const transcript = stream.transcript().slice(0, 8000);
+      if (timedOut) {
+        const secs = config.claudeTimeoutSeconds;
+        finish({ ok: false, output: `TIMEOUT ${secs} dtk — proses dimatikan. Output parsial:\n${transcript}`, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: true });
+        return;
+      }
+      const hitLimit = detectLimit(transcript);
       finish({
         ok: code === 0 && !hitLimit,
-        output: combined || `(exit ${code})`,
+        output: transcript || `(exit ${code})`,
         hitLimit,
-        retryAfterMs: hitLimit ? parseRetryAfter(combined) : null,
+        retryAfterMs: hitLimit ? parseRetryAfter(transcript) : null,
         cancelled: false,
+        timedOut: false,
       });
     });
   });

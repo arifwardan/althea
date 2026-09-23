@@ -1,22 +1,31 @@
 // Web dashboard: file statis public/ (hasil build Svelte) + API JSON.
 // Auth: ADMIN_PASSWORD wajib untuk akses non-localhost; tanpa password hanya
 // localhost yang dilayani (mode dev). Sesi via cookie HttpOnly / Bearer.
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, request as proxyRequest, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import type { AltheaState } from "./state.js";
 import { config } from "./config.js";
-import { pushTask, resolveApproval, cancelTask } from "./workflow.js";
+import { pushTask, pushFollowup, resolveApproval, cancelTask } from "./workflow.js";
 import {
   killRunning, setBrainOverride, effectiveBrain,
   normalizeEffort, normalizeModel, BRAIN_EFFORTS,
 } from "./claude.js";
 import { logEvent } from "./state.js";
 import {
-  addFromRepo, addFromZip, listProjects, removeProject, projectDir,
-  listFiles, readProjectFile, projectDiff,
+  addFromRepo, addFromZip, addBlank, addPrd, listProjects, removeProject, projectDir,
+  listFiles, readProjectFile, projectDiff, detectStack,
 } from "./projects.js";
+import {
+  createPreviewManager, readPreviewFile, resolveCommand as resolvePreviewCommand,
+  isStaticDir,
+} from "./preview.js";
+import {
+  startPipelineAuto, pausePipeline, resumePipeline, cancelPipeline,
+  pipelineOnFail, pipelineOnCancel,
+} from "./pipeline.js";
 import { getMetrics, checkBrain } from "./metrics.js";
+import { listServers, syncProjectMcps, mcpOverview } from "./mcp.js";
 import { goSleep, forceWake } from "./sleeper.js";
 import { buildReport } from "./report.js";
 import {
@@ -120,8 +129,53 @@ function serveStatic(urlPath: string, res: ServerResponse): boolean {
   return true;
 }
 
+/** Pecah path /api/projects/:name<MARKER><rest>; null bila tak cocok. */
+function splitProjectSub(path: string, marker: string): [string, string] | null {
+  const pre = "/api/projects/";
+  if (!path.startsWith(pre)) return null;
+  const rest = path.slice(pre.length);
+  const i = rest.indexOf(marker);
+  if (i < 0) return null;
+  return [decodeURIComponent(rest.slice(0, i)), rest.slice(i + marker.length)];
+}
+
+/** Teruskan request ke server dev project di localhost:port (untuk iframe preview). */
+function proxyToPort(req: IncomingMessage, res: ServerResponse, port: number, target: string): void {
+  const headers: Record<string, string | string[] | undefined> = { ...req.headers, host: `127.0.0.1:${port}` };
+  delete headers.connection;
+  const up = proxyRequest(
+    { host: "127.0.0.1", port, path: target, method: req.method || "GET", headers, timeout: 30_000 },
+    (upRes) => {
+      const h = { ...upRes.headers };
+      // Boleh di-iframe dashboard: buang header anti-framing milik upstream.
+      delete h["content-security-policy"];
+      delete h["x-frame-options"];
+      res.writeHead(upRes.statusCode || 502, h);
+      upRes.pipe(res);
+    },
+  );
+  up.on("timeout", () => {
+    up.destroy();
+    if (!res.headersSent) {
+      res.writeHead(504, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "preview timeout" }));
+    }
+  });
+  up.on("error", () => {
+    if (!res.headersSent) {
+      res.writeHead(502, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "preview tak merespons — cek status/log" }));
+    }
+  });
+  req.pipe(up);
+}
+
 export function startServer(s: AltheaState, save: () => void, port: number, host: string): void {
   const store = createStore();
+  const preview = createPreviewManager({ basePort: config.previewBasePort });
+  const haltPreview = () => preview.stopAll();
+  process.on("SIGINT", haltPreview);
+  process.on("SIGTERM", haltPreview);
   setBrainOverride({ model: s.brain?.model, effort: s.brain?.effort }); // override dashboard dari state
   const authRequired = config.adminPassword.length > 0;
   const sessionTtlMs = config.sessionDays * 86_400_000;
@@ -238,10 +292,47 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         return json(res, listProjects(s));
       }
       if (req.method === "POST" && path === "/api/projects") {
-        const { name, repoUrl } = JSON.parse((await body(req)) || "{}");
-        if (!name || !repoUrl) return json(res, { error: "name + repoUrl wajib" }, 400);
-        const r = await addFromRepo(s, String(name), String(repoUrl));
+        const { name, repoUrl, prompt } = JSON.parse((await body(req)) || "{}");
+        if (!name) return json(res, { error: "name wajib" }, 400);
+        const url = String(repoUrl || "").trim();
+        const goal = String(prompt || "").trim();
+        const r = url
+          ? await addFromRepo(s, String(name), url)
+          : await addBlank(s, String(name), goal);
         if (!r.ok) return json(res, { error: r.error }, 400);
+        // prompt = kerja otonom: susun PRD (atau langsung MVP bila PRD.md ada) dst.
+        if (goal) {
+          startPipelineAuto(s, String(name), goal);
+          forceWake(s, `pipeline ${name}`);
+        }
+        save();
+        return json(res, r.project);
+      }
+      if (req.method === "POST" && path === "/api/projects/prd") {
+        const maxBytes = 2 * 1024 * 1024 + 64 * 1024;
+        let raw: Buffer;
+        try {
+          raw = await bodyRaw(req, maxBytes);
+        } catch {
+          return json(res, { error: "PRD melebihi batas 2 MB" }, 413);
+        }
+        let up;
+        try {
+          up = parseMultipart(raw, req.headers["content-type"] || "");
+        } catch {
+          return json(res, { error: "body bukan multipart valid" }, 400);
+        }
+        const name = (up.fields.name || "").trim();
+        const goal = (up.fields.prompt || "").trim();
+        const file = up.files.find((f) => f.field === "file");
+        if (!name || !file) return json(res, { error: "field name + file wajib" }, 400);
+        if (!/\.(md|markdown|txt)$/i.test(file.fileName)) {
+          return json(res, { error: "hanya file .md / .markdown / .txt" }, 400);
+        }
+        const r = await addPrd(s, name, file.fileName, file.data);
+        if (!r.ok) return json(res, { error: r.error }, 400);
+        startPipelineAuto(s, name, goal || `wujudkan PRD ${file.fileName}`);
+        forceWake(s, `pipeline ${name}`);
         save();
         return json(res, r.project);
       }
@@ -260,11 +351,16 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
           return json(res, { error: "body bukan multipart valid" }, 400);
         }
         const name = (up.fields.name || "").trim();
+        const goal = (up.fields.prompt || "").trim();
         const file = up.files.find((f) => f.field === "file");
         if (!name || !file) return json(res, { error: "field name + file wajib" }, 400);
         if (!/\.zip$/i.test(file.fileName)) return json(res, { error: "hanya file .zip" }, 400);
         const r = addFromZip(s, name, file.fileName, file.data);
         if (!r.ok) return json(res, { error: r.error }, 400);
+        if (goal) {
+          startPipelineAuto(s, name, goal);
+          forceWake(s, `pipeline ${name}`);
+        }
         save();
         return json(res, r.project);
       }
@@ -272,8 +368,74 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         const name = decodeURIComponent(path.slice("/api/projects/".length));
         const r = removeProject(s, name);
         if (!r.ok) return json(res, { error: r.error }, 400);
+        preview.stop(name); // hapus project → matikan previewnya sekalian
         save();
         return json(res, { ok: true });
+      }
+      // Preview statis: /api/projects/:name/preview-file/<rel> (same-origin untuk iframe).
+      if (req.method === "GET") {
+        const sp = splitProjectSub(path, "/preview-file/");
+        if (sp) {
+          const dir = projectDir(sp[0]);
+          if (!dir || !existsSync(dir)) return json(res, { error: "project tak dikenal" }, 404);
+          const f = readPreviewFile(dir, sp[1] || "index.html");
+          if (!f.ok) return json(res, { error: f.error }, 404);
+          res.writeHead(200, {
+            "content-type": f.mime,
+            "cache-control": (f.mime || "").startsWith("text/html") ? "no-store" : "public, max-age=60",
+          });
+          res.end(f.data);
+          return;
+        }
+      }
+      // Proxy ke server dev project: /api/projects/:name/app/<rest> (same-origin untuk iframe).
+      {
+        const sp = splitProjectSub(path, "/app/");
+        if (sp) {
+          const dir = projectDir(sp[0]);
+          if (!dir || !existsSync(dir)) return json(res, { error: "project tak dikenal" }, 404);
+          const pport = preview.portOf(sp[0]);
+          if (!pport) return json(res, { error: "preview belum jalan — tekan [jalankan] dulu" }, 409);
+          proxyToPort(req, res, pport, "/" + sp[1] + url.search);
+          return;
+        }
+      }
+      if (req.method === "GET" && path.startsWith("/api/projects/") && path.endsWith("/preview")) {
+        const name = decodeURIComponent(path.slice("/api/projects/".length, -"/preview".length));
+        const dir = projectDir(name);
+        if (!dir || !existsSync(dir)) return json(res, { error: "project tak dikenal" }, 404);
+        const p = s.projects.find((x) => x.name === name);
+        return json(res, {
+          ...(await preview.status(name, dir, detectStack(dir), p?.previewCmd || "")),
+          savedCmd: p?.previewCmd || "",
+          isStatic: isStaticDir(dir),
+        });
+      }
+      if (req.method === "POST" && path.startsWith("/api/projects/") && path.endsWith("/preview")) {
+        const name = decodeURIComponent(path.slice("/api/projects/".length, -"/preview".length));
+        const dir = projectDir(name);
+        if (!dir || !existsSync(dir)) return json(res, { error: "project tak dikenal" }, 404);
+        const p = s.projects.find((x) => x.name === name);
+        const { action, cmd } = JSON.parse((await body(req)) || "{}");
+        if (action === "stop") {
+          const stopped = preview.stop(name);
+          save();
+          return json(res, { ok: true, stopped });
+        }
+        if (action !== "start") return json(res, { error: "action: start|stop" }, 400);
+        if (typeof cmd === "string" && cmd.trim()) {
+          if (p) p.previewCmd = cmd.trim().slice(0, 500);
+        }
+        const finalCmd = resolvePreviewCommand(detectStack(dir), p?.previewCmd || "");
+        if (!finalCmd) {
+          save();
+          return json(res, {
+            error: "belum ada command untuk stack ini — isi command preview dulu (mis. \"go run .\" atau \"npm run dev\")",
+          }, 400);
+        }
+        const info = await preview.start(name, dir, finalCmd);
+        save();
+        return json(res, { ok: info.state !== "failed", ...info });
       }
       if (req.method === "GET" && path.startsWith("/api/projects/") && path.endsWith("/diff")) {
         const name = decodeURIComponent(path.slice("/api/projects/".length, -"/diff".length));
@@ -295,9 +457,63 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         const id = decodeURIComponent(path.slice("/api/tasks/".length, -"/cancel".length));
         killRunning(); // hentikan proses bila yang berjalan
         const ok = cancelTask(s, id);
-        if (ok) forceWake(s, `batal ${id}`);
+        if (ok) {
+          pipelineOnCancel(s, id); // tugas fase → pipeline ikut jeda
+          forceWake(s, `batal ${id}`);
+        }
         save();
         return json(res, { ok });
+      }
+      if (req.method === "POST" && path.startsWith("/api/tasks/") && path.endsWith("/followup")) {
+        const id = decodeURIComponent(path.slice("/api/tasks/".length, -"/followup".length));
+        const { prompt } = JSON.parse((await body(req)) || "{}");
+        const t = pushFollowup(s, String(id), String(prompt || ""));
+        if (!t) return json(res, { error: "tugas induk tak ada / prompt kosong" }, 400);
+        forceWake(s, `lanjutan ${id}`);
+        save();
+        return json(res, t);
+      }
+      if (req.method === "POST" && path.startsWith("/api/projects/") && path.endsWith("/pipeline")) {
+        const name = decodeURIComponent(path.slice("/api/projects/".length, -"/pipeline".length));
+        const { action } = JSON.parse((await body(req)) || "{}");
+        const p = s.projects.find((x) => x.name === name);
+        if (!p?.pipeline) return json(res, { error: "project tanpa pipeline" }, 404);
+        let ok = false;
+        if (action === "pause") ok = pausePipeline(s, name);
+        else if (action === "resume") { resumePipeline(s, name); ok = true; forceWake(s, `pipeline ${name}`); }
+        else if (action === "cancel") { ok = cancelPipeline(s, name); if (ok) killRunning(); }
+        else return json(res, { error: "action: pause|resume|cancel" }, 400);
+        save();
+        return json(res, { ok, pipeline: p.pipeline });
+      }
+      if (req.method === "GET" && path.startsWith("/api/projects/") && path.endsWith("/mcps")) {
+        const name = decodeURIComponent(path.slice("/api/projects/".length, -"/mcps".length));
+        const p = s.projects.find((x) => x.name === name);
+        if (!p) return json(res, { error: "project tak dikenal" }, 404);
+        return json(res, mcpOverview(p.mcps || []));
+      }
+      if (req.method === "PUT" && path.startsWith("/api/projects/") && path.endsWith("/mcps")) {
+        const name = decodeURIComponent(path.slice("/api/projects/".length, -"/mcps".length));
+        const p = s.projects.find((x) => x.name === name);
+        if (!p) return json(res, { error: "project tak dikenal" }, 404);
+        const { mcps } = JSON.parse((await body(req)) || "{}");
+        if (!Array.isArray(mcps)) return json(res, { error: "mcps harus array id" }, 400);
+        const known = new Set(listServers().map((d) => d.id));
+        const clean = [...new Set(mcps.map(String))].filter((id) => known.has(id));
+        if (clean.length !== new Set(mcps.map(String)).size) {
+          return json(res, { error: `id MCP tak dikenal (pilih: ${[...known].join("|")})` }, 400);
+        }
+        p.mcps = clean;
+        let synced = null;
+        try {
+          synced = syncProjectMcps(clean);
+          if (!synced.ok) logEvent(s, `mcp sync @${name} gagal: ${synced.error}`);
+          else if (synced.changed) logEvent(s, `mcp sync @${name}: ${clean.join(",") || "mati semua"}`);
+        } catch (e) {
+          logEvent(s, `mcp sync @${name} gagal: ${String(e)}`);
+        }
+        save();
+        return json(res, { ok: true, ...mcpOverview(clean), synced });
       }
       if (req.method === "GET" && path.startsWith("/api/tasks/") && path.endsWith("/log")) {
         const id = decodeURIComponent(path.slice("/api/tasks/".length, -"/log".length));
@@ -330,6 +546,7 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         const { id, ok, note } = JSON.parse((await body(req)) || "{}");
         const done = resolveApproval(s, String(id), Boolean(ok), String(note || ""), "admin-web");
         if (done && ok) forceWake(s, `approval web ${id}`);
+        if (done && !ok) pipelineOnFail(s, String(id)); // tolak tugas fase → pipeline gagal
         save();
         return json(res, { ok: done });
       }

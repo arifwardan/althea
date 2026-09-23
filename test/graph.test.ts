@@ -7,7 +7,7 @@ import { defaultState } from "../src/state.js";
 import { pushTask } from "../src/workflow.js";
 
 const ok = (output: string): ClaudeResult =>
-  ({ ok: true, output, hitLimit: false, retryAfterMs: null, cancelled: false });
+  ({ ok: true, output, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false });
 
 function mock(responder: (prompt: string, calls: string[]) => ClaudeResult): { run: RunFn; calls: string[] } {
   const calls: string[] = [];
@@ -80,6 +80,19 @@ describe("runGraphTask", () => {
     const { run } = mock(() => ({ ...ok(""), ok: false, cancelled: true }));
     const g = await runGraphTask({ task: t, maxRounds: 3, run });
     assert.equal(g.cancelled, true);
+  });
+
+  it("timedOut di tengah → sinyal timeout + plan tersimpan (retry)", async () => {
+    const t = freshTask();
+    const { run, calls } = mock((p) =>
+      p.startsWith("Kamu pelaksana")
+        ? { ...ok(""), ok: false, timedOut: true }
+        : ok("rencana"));
+    const g = await runGraphTask({ task: t, maxRounds: 3, run });
+    assert.equal(g.timedOut, true);
+    assert.equal(g.approved, false);
+    assert.equal(byNode(calls).review, 0); // langsung abort, tak bakar ronde review
+    assert.equal(t.graph?.plan, "rencana");
   });
 
   it("resume: plan+feedback dipakai, node plan dilewati", async () => {
