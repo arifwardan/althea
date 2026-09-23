@@ -59,9 +59,17 @@ export const config = {
   projectMaxMb: num("PROJECT_MAX_MB", 50) || 50,
   gitBin: process.env.GIT_BIN || "git",
   gitTimeoutSeconds: num("GIT_TIMEOUT_SECONDS", 180) || 180,
+  // Verifier deterministik (FR-3.10): skrip npm project setelah implementasi.
+  verifyEnabled: process.env.VERIFY_ENABLED !== "0",
+  verifyScripts: (process.env.VERIFY_SCRIPTS || "check,test,build").split(",").map((s) => s.trim()).filter(Boolean),
+  verifyTimeoutMs: (num("VERIFY_TIMEOUT_SECONDS", 180) || 180) * 1000,
   // Agen LangGraph: plan→implement→review loop. 0 = mode single-shot lama.
   graphEnabled: process.env.GRAPH_ENABLED !== "0",
   graphMaxRounds: num("GRAPH_MAX_ROUNDS", 3) || 3,
+  // Hemat token: plan "slice" = tanpa ronde LLM; review "gate" = cek diff sistem.
+  // Default llm/llm = perilaku lama; kebijakan per-fase pipeline menimpa ini.
+  graphPlanMode: ((process.env.GRAPH_PLAN_MODE || "llm").trim().toLowerCase() === "slice" ? "slice" : "llm") as "llm" | "slice",
+  graphReviewMode: ((process.env.GRAPH_REVIEW_MODE || "llm").trim().toLowerCase() === "gate" ? "gate" : "llm") as "llm" | "gate",
   // Pipeline project: maks ronde fase fitur (tiap ronde = 1 tugas implementasi).
   pipelineFeatureRounds: num("PIPELINE_FEATURE_ROUNDS", 3) || 3,
 };

@@ -10,7 +10,7 @@ import { pushTask, cancelTask } from "../src/workflow.js";
 import { pushFollowup } from "../src/workflow.js";
 import { addBlank, addPrd } from "../src/projects.js";
 import {
-  fiturRound, nextPhase, buildPhasePrompt, startPipelineAuto,
+  fiturRound, nextPhase, buildPhasePrompt, graphModeForPhase, startPipelineAuto,
   advancePipeline, pipelineOnFail, pipelineOnCancel,
   pausePipeline, resumePipeline, cancelPipeline,
 } from "../src/pipeline.js";
@@ -46,6 +46,14 @@ describe("transisi fase", () => {
     assert.equal(nextPhase("fitur-2", "SELESAI: semua jadi", 3), "rilis");
     assert.equal(nextPhase("fitur-1", "tanpa marker", 3), "rilis");
     assert.equal(nextPhase("fitur-3", "LANJUT: masih ada", 3), "rilis");
+  });
+  it("graphModeForPhase: review LLM hanya di rilis, fitur hemat total", () => {
+    assert.deepEqual(graphModeForPhase("fitur-2"), { planMode: "slice", reviewMode: "gate" });
+    assert.deepEqual(graphModeForPhase("prd"), { planMode: "llm", reviewMode: "gate" });
+    assert.deepEqual(graphModeForPhase("mvp"), { planMode: "llm", reviewMode: "gate" });
+    assert.deepEqual(graphModeForPhase("rilis"), { planMode: "slice", reviewMode: "llm" });
+    assert.equal(graphModeForPhase(undefined), null);
+    assert.equal(graphModeForPhase("aneh"), null);
   });
   it("prompt fase memuat instruksi kuncinya", () => {
     const prd = buildPhasePrompt("prd", "pos kasir");

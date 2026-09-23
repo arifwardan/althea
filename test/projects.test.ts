@@ -11,6 +11,7 @@ import {
   validName, validRepoUrl, projectDir, detectStack, safeZipEntries,
   addFromZip, addFromRepo, removeProject, listProjects,
   listFiles, readProjectFile, projectDiff, snapshotFiles, startFileWatch,
+  readStandards, prdSlice, contextTree,
 } from "../src/projects.js";
 import { parseMultipart } from "../src/server.js";
 
@@ -116,6 +117,35 @@ describe("review: files + isi file", () => {
     assert.equal(readProjectFile("rv", "a.js").content, "console.log(1)");
     assert.equal(readProjectFile("rv", "../kabur").ok, false);
     assert.equal(readProjectFile("rv", "tak-ada.js").ok, false);
+  });
+});
+
+describe("context pack (FR-3.8, FR-3.11)", () => {
+  it("readStandards/prdSlice: ada → isi terpangkas; tak ada → null", () => {
+    const d = join(tmp, "ctx");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "STANDARDS.md"), "aturan main");
+    writeFileSync(join(d, "PRD.md"), "X".repeat(5000));
+    assert.equal(readStandards("ctx"), "aturan main");
+    assert.equal(prdSlice("ctx")?.length, 1500);
+    assert.equal(readStandards("tak-ada"), null);
+    assert.equal(prdSlice("tak-ada"), null);
+  });
+  it("contextTree: round-robin, pangkas dalam, lewati folder berat", () => {
+    const d = join(tmp, "ctx2");
+    mkdirSync(join(d, "a"), { recursive: true });
+    mkdirSync(join(d, "b"), { recursive: true });
+    mkdirSync(join(d, "node_modules"), { recursive: true });
+    mkdirSync(join(d, "a", "deep", "deeper", "too", "deep"), { recursive: true });
+    for (let i = 0; i < 10; i++) writeFileSync(join(d, "a", `f${i}.ts`), "x");
+    writeFileSync(join(d, "b", "g.ts"), "y");
+    writeFileSync(join(d, "node_modules", "z.js"), "skip");
+    writeFileSync(join(d, "a", "deep", "deeper", "too", "deep", "h.ts"), "deep");
+    const lines = contextTree("ctx2", 6).split("\n");
+    assert.equal(lines.length, 6);
+    assert.ok(lines.includes("b/g.ts")); // folder kecil tak tergusur folder besar
+    assert.ok(!lines.some((l) => l.startsWith("node_modules")));
+    assert.ok(!lines.some((l) => l.includes("too/deep")));
   });
 });
 

@@ -10,7 +10,7 @@ import { isSleeping, forceWake } from "./sleeper.js";
 import { runClaude, enterLimitCooldown, limitDue, brainSummary, effectiveBrain } from "./claude.js";
 import { checkBrain } from "./metrics.js";
 import { projectDir } from "./projects.js";
-import { advancePipeline, pipelineOnFail } from "./pipeline.js";
+import { advancePipeline, pipelineOnFail, graphModeForPhase } from "./pipeline.js";
 import { pollTelegram, notifyAdmins, askApproval } from "./telegram.js";
 import { startServer } from "./server.js";
 import { buildReport } from "./report.js";
@@ -127,16 +127,24 @@ async function tick(): Promise<void> {
       logEvent(state, `mcp sync @${top.project} gagal: ${String(e)} (lanjut tanpa MCP)`);
     }
   }
-  // Mode graph: plan→implement→review; hasil dinormalisasi ke bentuk runClaude
+  // Mode graph: plan→implement→gate/review; hasil dinormalisasi ke bentuk runClaude
   // agar limit/IZIN/done/failed ditangani kode yang sama di bawah.
+  // Hemat token: fase pipeline menimpa default config (fitur = slice+gate,
+  // review LLM penuh hanya di rilis). Review akhir manusia via panel dashboard.
   let graphNote = "";
   let graphIn = 0;
   const runGraphMode = async () => {
     // Lazy import: LangGraph berat dimuat, jangan bebani boot & mode single-shot.
     const { runGraphTask } = await import("./agent/graph.js");
+    const gm = graphModeForPhase(top.phase);
     const g = await runGraphTask({
       task: top, cwd, maxRounds: config.graphMaxRounds,
       autoApprove: config.claudeDryRun,
+      planMode: gm?.planMode || config.graphPlanMode,
+      reviewMode: gm?.reviewMode || config.graphReviewMode,
+      verify: config.verifyEnabled && cwd
+        ? { scripts: config.verifyScripts, timeoutMs: config.verifyTimeoutMs }
+        : false,
       onLine: pushLine,
       onEvent: (m) => logEvent(state, `${top.id} ${m}`),
       onActivity: pushActivity,
@@ -146,7 +154,10 @@ async function tick(): Promise<void> {
     if (g.hitLimit) return { ok: false, output: "", hitLimit: true, retryAfterMs: g.retryAfterMs, cancelled: false, timedOut: false };
     if (g.timedOut) return { ok: false, output: "", hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: true };
     if (!g.approved) {
-      return { ok: false, output: `review tak lolos ${config.graphMaxRounds} ronde. ${g.note}`, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false };
+      const why = g.reviewKind === "gate"
+        ? `gate sistem tak lolos (${config.graphMaxRounds} ronde, tanpa token LLM). Cek diff di panel review.`
+        : `review tak lolos ${config.graphMaxRounds} ronde.`;
+      return { ok: false, output: `${why} ${g.note}`, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false };
     }
     graphNote = g.note;
     return { ok: true, output: g.outputs.join("\n"), hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false };

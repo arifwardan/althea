@@ -24,6 +24,7 @@ export interface StackTask {
   prompt: string; // prompt lengkap untuk Muse CLI — inilah yang di-resume
   project?: string; // nama project di workspace (Muse jalan di folder itu)
   phase?: string; // id fase pipeline (prd|mvp|fitur-N|rilis) bila bagian pipeline
+  scope?: string[]; // allowlist path relatif yang boleh diubah (FR-3.8); kosong = tak dibatasi
   graph?: GraphProgress; // progres graph LangGraph (agar resume tak mengulang)
   usage?: Usage; // akumulasi karakter + estimasi token tugas ini
   status: TaskStatus;

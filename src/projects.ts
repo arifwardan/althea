@@ -229,6 +229,33 @@ export function listFiles(name: string, max = 200): { ok: boolean; error?: strin
   return { ok: true, files: out };
 }
 
+/**
+ * Pohon konteks hemat token (FR-3.8): maks 40 path, round-robin per direktori
+ * teratas agar satu folder besar tak mendominasi, pangkas path > 4 segmen.
+ */
+export function contextTree(name: string, max = 40): string {
+  const lf = listFiles(name, 200);
+  if (!lf.ok || !lf.files?.length) return "-";
+  const groups = new Map<string, string[]>();
+  for (const f of lf.files) {
+    const segs = f.path.split("/");
+    if (segs.length > 4) continue;
+    const top = segs.length > 1 ? segs[0] : "(root)";
+    if (!groups.has(top)) groups.set(top, []);
+    groups.get(top)!.push(f.path);
+  }
+  const lists = [...groups.values()];
+  const out: string[] = [];
+  while (out.length < max && lists.some((l) => l.length)) {
+    for (const l of lists) {
+      if (out.length >= max) break;
+      const p = l.shift();
+      if (p) out.push(p);
+    }
+  }
+  return out.length ? out.join("\n") : "-";
+}
+
 /** Foto file dir (rel → size+mtime), lewati folder berat, maks 500 entri. */
 export function snapshotFiles(dir: string, max = 500): Map<string, { size: number; mtimeMs: number }> {
   const out = new Map<string, { size: number; mtimeMs: number }>();
@@ -313,6 +340,29 @@ export function readProjectFile(name: string, relPath: string): { ok: boolean; e
   const buf = readFileSync(target);
   if (buf.includes(0)) return { ok: false, error: "file biner" };
   return { ok: true, content: buf.toString("utf8").slice(0, 200_000) };
+}
+
+/**
+ * Isi STANDARDS.md project (FR-3.11; maks 4000 char) atau null bila tak ada.
+ * Disuntik ke prompt tugas project oleh graph — satu sumber konvensi,
+ * bukan instruksi berulang yang membakar token tiap tugas.
+ */
+export function readStandards(name: string, maxChars = 4000): string | null {
+  const r = readProjectFile(name, "STANDARDS.md");
+  if (!r.ok || !r.content) return null;
+  const t = r.content.trim();
+  return t ? t.slice(0, maxChars) : null;
+}
+
+/**
+ * Potongan PRD.md project (FR-3.8; maks 1500 char) atau null bila tak ada.
+ * Cukup untuk fokus kerja fase; model membaca file penuh hanya bila perlu.
+ */
+export function prdSlice(name: string, maxChars = 1500): string | null {
+  const r = readProjectFile(name, "PRD.md");
+  if (!r.ok || !r.content) return null;
+  const t = r.content.trim();
+  return t ? t.slice(0, maxChars) : null;
 }
 
 function git(args: string[], cwd: string): Promise<{ code: number; out: string }> {

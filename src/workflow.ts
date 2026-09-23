@@ -10,7 +10,8 @@ export function pushTask(
   title: string,
   prompt: string,
   note = "",
-  project?: string
+  project?: string,
+  scope?: string[]
 ): StackTask {
   const now = new Date().toISOString();
   const t: StackTask = {
@@ -18,6 +19,7 @@ export function pushTask(
     title: title.slice(0, 120) || "(tanpa judul)",
     prompt,
     ...(project ? { project } : {}),
+    ...(scope?.length ? { scope: scope.map((x) => x.trim()).filter(Boolean).slice(0, 50) } : {}),
     status: "queued",
     attempts: 0,
     note,

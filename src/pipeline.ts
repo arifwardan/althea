@@ -27,6 +27,23 @@ export function nextPhase(phaseId: string, output: string, maxFitur: number): st
   return /^\s*LANJUT:/m.test(output) && round < maxFitur ? `fitur-${round + 1}` : "rilis";
 }
 
+export interface PhaseGraphMode { planMode: "llm" | "slice"; reviewMode: "llm" | "gate"; }
+
+/**
+ * Kebijakan hemat token per fase (menimpa GRAPH_PLAN_MODE/GRAPH_REVIEW_MODE):
+ * - prd/mvp: plan LLM (sekali per project, cegah rework mahal), review gate sistem.
+ * - fitur-N: plan slice + review gate (0 token plan/review; manusia review di dashboard).
+ * - rilis: satu-satunya fase dengan review LLM penuh.
+ * - null = bukan tugas pipeline → pakai default config.
+ */
+export function graphModeForPhase(phaseId: string | undefined): PhaseGraphMode | null {
+  if (!phaseId) return null;
+  if (phaseId === "rilis") return { planMode: "slice", reviewMode: "llm" };
+  if (phaseId === "prd" || phaseId === "mvp") return { planMode: "llm", reviewMode: "gate" };
+  if (fiturRound(phaseId) > 0) return { planMode: "slice", reviewMode: "gate" };
+  return null;
+}
+
 /** Judul + prompt tugas untuk satu fase pipeline. */
 export function buildPhasePrompt(phaseId: string, goal: string): { title: string; prompt: string } {
   const g = goal.trim() || "(tanpa goal — baca PRD.md bila ada)";
