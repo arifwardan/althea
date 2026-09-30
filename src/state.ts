@@ -8,9 +8,20 @@ export type TaskStatus =
   | "queued"
   | "running"
   | "waiting_approval"
+  | "waiting_quota"
   | "sleeping"
   | "done"
   | "failed";
+
+/** Satu episode limit kuota (FR-4.4): kapan kena, kapan lanjut, durasi jeda. */
+export interface QuotaEvent {
+  taskId: string;
+  title: string;
+  hitAt: string; // kapan limit terdeteksi
+  resumeAt: string | null; // kapan selesai menunggu (resume/batal), null = masih menunggu
+  waitMs: number | null; // durasi jeda, diisi saat resumeAt diset
+  until: string; // estimasi reset saat limit terdeteksi (FR-4.1)
+}
 
 export interface GraphProgress {
   plan?: string;
@@ -23,6 +34,7 @@ export interface StackTask {
   title: string;
   prompt: string; // prompt lengkap untuk Muse CLI — inilah yang di-resume
   project?: string; // nama project di workspace (Muse jalan di folder itu)
+  askOnly?: boolean; // /ask: answer only, must not change anything
   phase?: string; // id fase pipeline (prd|mvp|fitur-N|rilis) bila bagian pipeline
   scope?: string[]; // allowlist path relatif yang boleh diubah (FR-3.8); kosong = tak dibatasi
   graph?: GraphProgress; // progres graph LangGraph (agar resume tak mengulang)
@@ -55,6 +67,8 @@ export interface Project {
   name: string;
   source: string; // URL repo | "zip:<nama-file>" | "blank" | "prd:<nama-file>" | "manual"
   stack: string; // node | go | python | generic (deteksi otomatis)
+  stackSpec?: { fe: string; be: string; db: string; css: string }; // pilihan user per lapisan
+  categories?: { fungsi: string[]; bisnis: string[]; arsitektur: string[]; target: string[]; interaksi: string[] };
   addedAt: string;
   pipeline?: Pipeline; // alur otonom PRD→MVP→fitur→rilis (opsional)
   mcps?: string[]; // id MCP server aktif untuk project ini (disuntik ke settings CLI saat spawn)
@@ -78,6 +92,10 @@ export interface BrainSetting {
   effort: string; // "" = ikut default env/CLI
 }
 
+export interface LimitsSetting {
+  timeoutSeconds: number; // 0 = ikut default env (CLAUDE_TIMEOUT_SECONDS)
+}
+
 /** Satu baris feed aktivitas tugas: tool/file dipanggil saat run. */
 export interface TaskActivity {
   t: string; // jam:menit:detik
@@ -90,6 +108,7 @@ export interface TaskActivity {
 export interface AltheaState {
   version: 1;
   brain: BrainSetting; // override dashboard (PUT /api/brain), berlaku spawn berikutnya
+  limits: LimitsSetting; // override dashboard (PUT /api/limits), berlaku spawn berikutnya
   stack: StackTask[]; // tumpukan dinamis: puncak = elemen terakhir (LIFO)
   approvals: Approval[];
   projects: Project[]; // registry project di workspace/
@@ -99,6 +118,7 @@ export interface AltheaState {
   sleepUntil: string | null; // ISO atau null
   limitCooldownUntil: string | null; // ISO: kapan boleh coba Muse lagi setelah limit
   lastReset: string | null;
+  quotaHistory: QuotaEvent[]; // riwayat limit→resume (FR-4.4, maks 50 terakhir)
   events: string[]; // log ringkas (maks 200)
   bootedAt: string;
 }
@@ -107,6 +127,7 @@ export function defaultState(): AltheaState {
   return {
     version: 1,
     brain: { model: "", effort: "" },
+    limits: { timeoutSeconds: 0 },
     stack: [],
     approvals: [],
     projects: [],
@@ -116,6 +137,7 @@ export function defaultState(): AltheaState {
     sleepUntil: null,
     limitCooldownUntil: null,
     lastReset: null,
+    quotaHistory: [],
     events: [],
     bootedAt: new Date().toISOString(),
   };
@@ -139,11 +161,38 @@ export function loadState(path: string): AltheaState {
     if (!s.brain || typeof s.brain !== "object") s.brain = { model: "", effort: "" };
     if (typeof s.brain.model !== "string") s.brain.model = "";
     if (typeof s.brain.effort !== "string") s.brain.effort = "";
+    // Migrasi: state lama belum punya override batas eksekusi.
+    if (!s.limits || typeof s.limits !== "object") s.limits = { timeoutSeconds: 0 };
+    if (!Number.isFinite(s.limits.timeoutSeconds) || (s.limits.timeoutSeconds as number) < 0) {
+      s.limits.timeoutSeconds = 0;
+    }
     if (!Array.isArray(s.events)) s.events = [];
-    // Migrasi: project lama belum punya daftar MCP / command preview.
+    // Migrasi: state lama belum punya riwayat kuota (FR-4.4).
+    if (!Array.isArray(s.quotaHistory)) s.quotaHistory = [];
+    // Migrasi: project lama belum punya MCP / previewCmd / stackSpec / categories.
+    // (Struktural saja di sini agar tak ada import siklik ke projects.ts;
+    // normalisasi kanonis ada di normalizeStackSpec/normalizeCategories.)
     for (const p of s.projects) {
       if (!Array.isArray((p as Project).mcps)) (p as Project).mcps = [];
       if (typeof (p as Project).previewCmd !== "string") (p as Project).previewCmd = "";
+      const legacy = p as Project & { techStack?: unknown; category?: unknown };
+      const spec = legacy.stackSpec;
+      if (!spec || typeof spec !== "object") {
+        const t = typeof legacy.techStack === "string" ? legacy.techStack.trim().toLowerCase() : "";
+        const be = ["laravel", "node", "python", "go"].includes(t) ? t : "laravel";
+        legacy.stackSpec = { fe: "svelte", be, db: "postgresql", css: "tailwind" };
+      }
+      delete legacy.techStack;
+      const cats = legacy.categories;
+      if (!cats || typeof cats !== "object") {
+        const c = typeof legacy.category === "string" ? legacy.category.trim().slice(0, 40).toLowerCase() : "";
+        legacy.categories = { fungsi: c ? [c] : [], bisnis: [], arsitektur: [], target: [], interaksi: [] };
+      } else {
+        for (const d of ["fungsi", "bisnis", "arsitektur", "target", "interaksi"] as const) {
+          if (!Array.isArray(cats[d])) cats[d] = [];
+        }
+      }
+      delete legacy.category;
     }
     // Migrasi: approval lama sudah dikirim ke telegram → anggap stage telegram.
     for (const a of s.approvals) {

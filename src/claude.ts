@@ -95,6 +95,47 @@ export function effectiveBrain(o: BrainOverride = override, env: BrainEnv = defa
   };
 }
 
+// ——— Batas eksekusi: timeout per-spawn yang bisa diubah dari dashboard ———
+// Preseden sama seperti otak: override dashboard (state, via PUT /api/limits)
+// > env (CLAUDE_TIMEOUT_SECONDS) > default 1800 detik.
+// Berlaku untuk spawn BERIKUTNYA; proses yang sedang jalan tidak diganggu.
+export const TIMEOUT_MIN_SECONDS = 60;
+export const TIMEOUT_MAX_SECONDS = 86400;
+export const TIMEOUT_DEFAULT_SECONDS = 1800;
+
+/** Detik valid (60–86400) atau 0 = kembali ke default. Selain itu → null (invalid). */
+export function parseTimeoutSeconds(v: unknown): number | null {
+  if (v === undefined || v === null || v === "") return 0;
+  const n = typeof v === "number" ? v : Number(String(v).trim());
+  if (!Number.isFinite(n)) return null;
+  if (n === 0) return 0;
+  if (!Number.isInteger(n) || n < TIMEOUT_MIN_SECONDS || n > TIMEOUT_MAX_SECONDS) return null;
+  return n;
+}
+
+let timeoutOverride = 0;
+
+/** Nilai invalid → jatuh ke 0 (= default), tak pernah meledak. */
+export function setTimeoutOverride(v: unknown): void {
+  const n = parseTimeoutSeconds(v);
+  timeoutOverride = n === null ? 0 : n;
+}
+
+export interface EffectiveTimeout {
+  seconds: number;
+  source: "dashboard" | "env" | "default";
+}
+
+/** Param opsional agar murni & mudah di-test; produksi selalu default. */
+export function effectiveTimeoutSeconds(
+  overrideSecs: number = timeoutOverride,
+  envSecs: number = config.claudeTimeoutSeconds,
+): EffectiveTimeout {
+  if (overrideSecs > 0) return { seconds: overrideSecs, source: "dashboard" };
+  if (envSecs > 0) return { seconds: envSecs, source: "env" };
+  return { seconds: TIMEOUT_DEFAULT_SECONDS, source: "default" };
+}
+
 /** Susun argv spawn. Flags model/effort hanya untuk gaya exec (terverifikasi); gaya lama tetap -p. */
 export function brainArgs(prompt: string, b: EffectiveBrain = effectiveBrain()): string[] {
   if (!b.subcommand) return ["-p", prompt];
@@ -119,7 +160,7 @@ export function brainArgs(prompt: string, b: EffectiveBrain = effectiveBrain()):
 export function spawnErrorNote(bin: string, err: unknown): string {
   const code = (err as { code?: string } | null)?.code;
   if (code === "ENOENT") {
-    return `otak tidak ditemukan: "${bin}" (ENOENT) — cek BRAIN_BIN di .env lalu restart server`;
+    return `brain not found: "${bin}" (ENOENT) — check BRAIN_BIN in .env then restart the server`;
   }
   return `spawn error: ${String(err)}`;
 }
@@ -173,6 +214,7 @@ export function runClaude(
   }
   return new Promise((resolve) => {
     const brain = effectiveBrain();
+    const timeoutSecs = effectiveTimeoutSeconds().seconds;
     const child = spawn(brain.bin, brainArgs(prompt, brain), {
       shell: false,
       ...(cwd ? { cwd } : {}),
@@ -188,7 +230,7 @@ export function runClaude(
       setTimeout(() => {
         try { if (!child.killed) child.kill("SIGKILL"); } catch { /* abaikan */ }
       }, 10_000);
-    }, config.claudeTimeoutSeconds * 1000);
+    }, timeoutSecs * 1000);
     // Pantau file project selama run (jalan tanpa project → tanpa watcher).
     const watch = cwd && onActivity ? startFileWatch(cwd, (kind, text) => onActivity({ kind, text })) : null;
     const finish = (r: ClaudeResult) => {
@@ -240,13 +282,12 @@ export function runClaude(
       }
       if (textRest && onLine) onLine(textRest.slice(0, 2000));
       if (ref.killed) {
-        finish({ ok: false, output: "DIBATALKAN oleh admin (kill-switch)", hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false });
+        finish({ ok: false, output: "CANCELLED by admin (kill-switch)", hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false });
         return;
       }
       const transcript = stream.transcript().slice(0, 8000);
       if (timedOut) {
-        const secs = config.claudeTimeoutSeconds;
-        finish({ ok: false, output: `TIMEOUT ${secs} dtk — proses dimatikan. Output parsial:\n${transcript}`, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: true });
+        finish({ ok: false, output: `TIMEOUT ${timeoutSecs}s — process killed. Partial output:\n${transcript}`, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: true });
         return;
       }
       const hitLimit = detectLimit(transcript);
@@ -267,7 +308,7 @@ export function enterLimitCooldown(s: AltheaState, retryAfterMs: number | null):
   const wait = retryAfterMs ?? resetMs(); // default: reset langganan ±5 jam
   const until = new Date(Date.now() + wait).toISOString();
   s.limitCooldownUntil = until;
-  logEvent(s, `limit token → cooldown sampai ${until}`);
+  logEvent(s, `token limit → cooldown until ${until}`);
   return until;
 }
 
@@ -277,7 +318,7 @@ export function limitDue(s: AltheaState, now = new Date()): boolean {
   if (new Date(s.limitCooldownUntil).getTime() <= now.getTime()) {
     s.limitCooldownUntil = null;
     s.lastReset = now.toISOString();
-    logEvent(s, "reset tiba → resume otomatis tanpa prompt ulang");
+    logEvent(s, "reset reached → auto-resume without re-prompting");
     return true;
   }
   return false;

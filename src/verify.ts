@@ -53,7 +53,7 @@ export async function runVerifyGates(
   cwd: string, scripts: string[], timeoutMs: number, run: RunCmd = realRunCmd,
 ): Promise<VerifyResult> {
   const avail = pkgScripts(cwd);
-  if (!avail) return { ok: true, ran: 0, summary: "verifier dilewati (tanpa package.json)", steps: [] };
+  if (!avail) return { ok: true, ran: 0, summary: "verifier skipped (no package.json)", steps: [] };
   const steps: VerifyStep[] = [];
   for (const s of scripts) {
     if (!avail.includes(s)) {
@@ -69,7 +69,7 @@ export async function runVerifyGates(
       return {
         ok: false,
         ran: steps.filter((x) => !x.skipped).length,
-        summary: `verifier gagal di "npm run ${s}":\n${output}`.slice(0, 2000),
+        summary: `verifier failed at "npm run ${s}":\n${output}`.slice(0, 2000),
         steps,
       };
     }
@@ -79,7 +79,7 @@ export async function runVerifyGates(
   return {
     ok: true,
     ran,
-    summary: ran ? `verifier lolos: ${detail}` : "verifier dilewati (tak ada skrip yang cocok)",
+    summary: ran ? `verifier passed: ${detail}` : "verifier skipped (no matching scripts)",
     steps,
   };
 }

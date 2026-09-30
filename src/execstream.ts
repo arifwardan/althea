@@ -85,9 +85,9 @@ export function createExecStream(): ExecStream {
         return r;
       }
       if (pt === "task.lifecycle.failed") {
-        const reason = String(ev.reason || "gagal").slice(0, 200);
+        const reason = String(ev.reason || "failed").slice(0, 200);
         if (/reminder/i.test(reason)) return r;
-        r.activities.push({ kind: "note", text: `gagal: ${reason}` });
+        r.activities.push({ kind: "note", text: `failed: ${reason}` });
         r.log.push(`[!] ${reason}`);
         return r;
       }

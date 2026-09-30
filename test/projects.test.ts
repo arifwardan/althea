@@ -11,7 +11,9 @@ import {
   validName, validRepoUrl, projectDir, detectStack, safeZipEntries,
   addFromZip, addFromRepo, removeProject, listProjects,
   listFiles, readProjectFile, projectDiff, snapshotFiles, startFileWatch,
-  readStandards, prdSlice, contextTree,
+  readStandards, prdSlice, contextTree, addBlank, addPrd,
+  normalizeStackSpec, isDefaultStack, isPreviewStack, stackSummary,
+  normalizeCategories, inferCategories, autoCategories, categoriesEmpty,
 } from "../src/projects.js";
 import { parseMultipart } from "../src/server.js";
 
@@ -83,7 +85,85 @@ describe("zip aman", () => {
     const zip = new AdmZip();
     zip.addFile("f.txt", Buffer.from("1"));
     assert.equal(addFromZip(s, "dup", "a.zip", zip.toBuffer()).ok, true);
-    assert.match(addFromZip(s, "dup", "a.zip", zip.toBuffer()).error as string, /sudah ada/);
+    assert.match(addFromZip(s, "dup", "a.zip", zip.toBuffer()).error as string, /already exists/);
+  });
+});
+
+describe("tech stack per lapisan", () => {
+  it("normalizeStackSpec: kosong → default penuh", () => {
+    assert.deepEqual(normalizeStackSpec(undefined), { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" });
+    assert.deepEqual(normalizeStackSpec(""), { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" });
+  });
+  it("normalizeStackSpec: parsial + string lama", () => {
+    assert.deepEqual(normalizeStackSpec({ be: "node" }), { fe: "svelte", be: "node", db: "postgresql", css: "tailwind" });
+    assert.deepEqual(normalizeStackSpec("node"), { fe: "svelte", be: "node", db: "postgresql", css: "tailwind" });
+    assert.deepEqual(normalizeStackSpec({ be: "rails", db: "mysql" }), { fe: "svelte", be: "laravel", db: "mysql", css: "tailwind" });
+  });
+  it("isDefaultStack / isPreviewStack / stackSummary", () => {
+    assert.equal(isDefaultStack(undefined), true);
+    assert.equal(isDefaultStack({ be: "node" }), false);
+    assert.equal(isPreviewStack("laravel"), true);
+    assert.equal(isPreviewStack(""), true); // project lama tanpa pilihan
+    assert.equal(isPreviewStack(undefined), true);
+    assert.equal(isPreviewStack({ be: "laravel", fe: "react" }), true); // BE Laravel tetap preview
+    assert.equal(isPreviewStack("node"), false);
+    assert.equal(isPreviewStack({ be: "go" }), false);
+    assert.equal(stackSummary(undefined), "Laravel + Svelte + PostgreSQL + Tailwind");
+  });
+});
+
+describe("kategori berlapis", () => {
+  it("normalizeCategories: rapikan + batasi", () => {
+    const c = normalizeCategories({ fungsi: [" E-Commerce ", "e-commerce", ""], bisnis: "b2c", aneh: ["x"] });
+    assert.deepEqual(c.fungsi, ["e-commerce"]);
+    assert.deepEqual(c.bisnis, ["b2c"]);
+    assert.deepEqual(c.interaksi, []);
+  });
+  it("inferCategories menebak berlapis ala SIMAKOST", () => {
+    const c = inferCategories("sistem informasi kost: kelola kamar, data penghuni, pembayaran bulanan, laporan");
+    assert.ok(c.fungsi.includes("properti"), JSON.stringify(c));
+    assert.ok(c.interaksi.includes("crud"), JSON.stringify(c));
+    assert.ok(c.interaksi.includes("transaksional"), JSON.stringify(c));
+    assert.ok(c.arsitektur.includes("monolith"), JSON.stringify(c));
+    assert.ok(c.target.includes("customer"), JSON.stringify(c));
+  });
+  it("inferCategories: kasir + teks kosong", () => {
+    const c = inferCategories("aplikasi pos kasir warung dengan checkout");
+    assert.ok(c.fungsi.includes("e-commerce"), JSON.stringify(c));
+    assert.ok(c.interaksi.includes("transaksional"), JSON.stringify(c));
+    assert.ok(categoriesEmpty(inferCategories("")));
+    assert.deepEqual(inferCategories("halo dunia").fungsi, ["umum"]);
+  });
+  it("autoCategories: dimensi user menang, kosong ditebak", () => {
+    const c = autoCategories({ fungsi: ["edukasi"] }, "aplikasi pos kasir warung");
+    assert.deepEqual(c.fungsi, ["edukasi"]);
+    assert.ok(c.interaksi.includes("transaksional"), JSON.stringify(c));
+    assert.ok(categoriesEmpty(autoCategories(undefined, "   ")));
+  });
+  it("addBlank: default stack + kategori dari goal bila tak diisi", async () => {
+    const s = defaultState();
+    const r = await addBlank(s, "kasirku", "aplikasi pos kasir warung");
+    assert.equal(r.ok, true);
+    assert.equal(isDefaultStack(r.project?.stackSpec), true);
+    assert.ok(r.project?.categories?.fungsi.includes("e-commerce"), JSON.stringify(r.project?.categories));
+  });
+  it("addBlank: spec non-default tersimpan; kategori user dihormati", async () => {
+    const s = defaultState();
+    const r = await addBlank(s, "pyku", "skrip otomasi", {
+      stack: { be: "python", db: "sqlite" },
+      categories: { interaksi: ["otomasi"] },
+    });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.project?.stackSpec, { fe: "svelte", be: "python", db: "sqlite", css: "tailwind" });
+    assert.deepEqual(r.project?.categories?.interaksi, ["otomasi"]);
+    assert.equal(isPreviewStack(r.project?.stackSpec), false);
+  });
+  it("addPrd: kategori ditebak dari isi PRD bila kosong", async () => {
+    const s = defaultState();
+    const r = await addPrd(s, "klinikku", "r.md", Buffer.from("# PRD\nsistem informasi klinik: dokter, pasien, antrian"));
+    assert.equal(r.ok, true);
+    assert.ok(r.project?.categories?.fungsi.includes("kesehatan"), JSON.stringify(r.project?.categories));
+    assert.equal(isDefaultStack(r.project?.stackSpec), true);
   });
 });
 
@@ -165,7 +245,7 @@ describe("review: projectDiff", () => {
     writeFileSync(join(tmp, "gr", "f.txt"), "baru");
     const d = await projectDiff("gr");
     assert.equal(d.repo, true);
-    assert.match(d.stat as string, /baru: f.txt/);
+    assert.match(d.stat as string, /new: f.txt/);
     mkdirSync(join(tmp, "ng"));
     assert.equal((await projectDiff("ng")).repo, false);
   });
@@ -210,7 +290,7 @@ describe("file watcher", () => {
     } finally {
       w.stop();
     }
-    assert.ok(got.some((t) => t === "baru: baru.txt"), JSON.stringify(got));
-    assert.ok(got.some((t) => t === "ubah: ada.txt"), JSON.stringify(got));
+    assert.ok(got.some((t) => t === "new: baru.txt"), JSON.stringify(got));
+    assert.ok(got.some((t) => t === "modified: ada.txt"), JSON.stringify(got));
   });
 });

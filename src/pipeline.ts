@@ -9,7 +9,7 @@ import { config } from "./config.js";
 import type { AltheaState, Project, StackTask } from "./state.js";
 import { logEvent } from "./state.js";
 import { pushTask, cancelTask } from "./workflow.js";
-import { projectDir } from "./projects.js";
+import { projectDir, normalizeStackSpec, normalizeCategories, CATEGORY_DIMS } from "./projects.js";
 
 /** Ronde ke-N dari id fase "fitur-N"; 0 bila bukan fase fitur. */
 export function fiturRound(phaseId: string): number {
@@ -44,20 +44,53 @@ export function graphModeForPhase(phaseId: string | undefined): PhaseGraphMode |
   return null;
 }
 
-/** Judul + prompt tugas untuk satu fase pipeline. */
-export function buildPhasePrompt(phaseId: string, goal: string): { title: string; prompt: string } {
-  const g = goal.trim() || "(tanpa goal — baca PRD.md bila ada)";
+/**
+ * Batas scope tambahan untuk reviewer LLM per fase. Saat ini hanya fase rilis
+ * yang membawa brief: cegah reviewer menggagalkan rilis karena langkah yang
+ * memang wewenang admin di luar tugas (tulis riwayat git, install dependensi
+ * baru) atau scope PRD yang fase-fitur sebelumnya menundanya eksplisit —
+ * keduanya harus diterima sebagai item checklist ✗ yang jujur, bukan alasan
+ * gagal. Fase lain → undefined (review standar).
+ */
+export function reviewBriefForPhase(phaseId: string | undefined): string | undefined {
+  if (phaseId !== "rilis") return undefined;
+  return [
+    "Release-scope review. Judge ONLY what this diff shows:",
+    "the release fixes work, README/docs are accurate, and the tree is tidy.",
+    "Accept honestly-marked failing checklist items (with a one-line reason)",
+    "for steps that need the admin outside this task — git history writes",
+    "(commit/push) and new dependency installs — and for PRD scope that",
+    "earlier phases explicitly deferred; do NOT fail the release for those.",
+  ].join(" ");
+}
+
+export interface PhasePromptOpts { stack?: unknown; categories?: unknown; }
+
+/** Title + task prompt for one pipeline phase. Everything is written in English. */
+export function buildPhasePrompt(phaseId: string, goal: string, opts: PhasePromptOpts = {}): { title: string; prompt: string } {
+  const g = goal.trim() || "(no goal — read PRD.md if present)";
+  const spec = normalizeStackSpec(opts.stack);
+  const stackLine = `Required stack — BE: ${spec.be}, FE: ${spec.fe}, DB: ${spec.db}, CSS: ${spec.css} (Althea default: Laravel + Svelte + PostgreSQL + Tailwind, preview via lerd).`;
+  const cats = normalizeCategories(opts.categories);
+  const catBits = CATEGORY_DIMS.filter((d) => cats[d].length).map((d) => `${d}: ${cats[d].join(", ")}`);
+  const catLine = catBits.length
+    ? `App categories — ${catBits.join("; ")}.`
+    : "App categories: not set — decide them from your analysis (function, business model, architecture, target users, interaction) and write them into the PRD.";
+  const englishLine = "Write everything in English. If the user's goal or any input is not in English, translate it to English first and work from the translation.";
   if (phaseId === "prd") {
     return {
       title: `PRD: ${g.slice(0, 60)}`,
       prompt: [
-        "Kamu analis produk + arsitek software.",
-        `Tujuan user: "${g}"`,
-        "Tulis PRD.md LENGKAP di direktori kerjamu: visi & pengguna, daftar fitur",
-        "(pisahkan MVP vs lanjutan + prioritas), user stories + kriteria terima tiap",
-        "fitur, pilihan stack + arsitektur + struktur folder, milestone, dan checklist",
-        '"siap jual/deploy".',
-        "Akhiri dengan ringkasan 5 baris: stack pilihan + fitur MVP.",
+        "You are a product analyst + software architect.",
+        `User goal: "${g}"`,
+        englishLine,
+        stackLine,
+        catLine,
+        "Write a COMPLETE PRD.md in your working directory: vision & users, feature list",
+        "(split MVP vs follow-ups + priorities), user stories + acceptance criteria per",
+        "feature, stack choice + architecture + folder structure, milestones, and a",
+        '"ready-to-sell/deploy" checklist.',
+        "End with a 5-line summary: chosen stack + MVP features.",
       ].join("\n"),
     };
   }
@@ -65,40 +98,44 @@ export function buildPhasePrompt(phaseId: string, goal: string): { title: string
     return {
       title: `MVP: ${g.slice(0, 60)}`,
       prompt: [
-        "Kamu engineer. Baca PRD.md di direktori kerjamu sampai paham, lalu",
-        "implementasikan SELURUH scope MVP hingga BENAR-BENAR BERJALAN",
-        "(bisa di-build/dijalankan, bukan stub). Jangan kerjakan fitur lanjutan dulu.",
-        "Akhiri dengan: cara menjalankan + daftar yang sudah bekerja.",
+        "You are an engineer. Read PRD.md in your working directory until you understand it, then",
+        "implement the ENTIRE MVP scope until it REALLY RUNS",
+        "(buildable/runnable, not stubs). Do not build follow-up features yet.",
+        englishLine,
+        stackLine,
+        "End with: how to run it + a list of what already works.",
       ].join("\n"),
     };
   }
   if (phaseId === "rilis") {
     return {
-      title: "Rilis: verifikasi + siap deploy",
+      title: "Release: verify + deploy-ready",
       prompt: [
-        "Kamu release engineer. Verifikasi aplikasi berjalan (build + smoke test via",
-        "perintah run/test-nya), perbaiki yang rusak, tulis README.md (cara",
-        "install/jalankan/deploy), dan rapikan kode.",
-        'Akhiri dengan checklist "siap jual/deploy": tiap item ✓/✗ + alasan singkat.',
+        "You are a release engineer. Verify the app runs (build + smoke test via",
+        "its run/test commands), fix what is broken, write README.md (how to",
+        "install/run/deploy), and tidy the code.",
+        englishLine,
+        'End with a "ready-to-sell/deploy" checklist: each item ✓/✗ + a one-line reason.',
       ].join("\n"),
     };
   }
   const round = Math.max(1, fiturRound(phaseId));
   return {
-    title: `Fitur lanjutan (ronde ${round})`,
+    title: `Follow-up features (round ${round})`,
     prompt: [
-      "Kamu engineer. Baca PRD.md di direktori kerjamu. Implementasikan fitur",
-      "prioritas tertinggi yang BELUM ada (boleh beberapa, wajib tetap berjalan).",
-      "Akhiri output dengan TEPAT SATU baris:",
-      '"SELESAI: <ringkasan>" jika SELURUH scope PRD sudah terimplementasi dan',
-      "berjalan, atau \"LANJUT: <daftar sisa fitur>\" jika masih ada sisa.",
+      "You are an engineer. Read PRD.md in your working directory. Implement the",
+      "highest-priority features that do NOT exist yet (several allowed, must keep running).",
+      englishLine,
+      "End your output with EXACTLY ONE line:",
+      '"SELESAI: <summary>" if the ENTIRE PRD scope is implemented and',
+      'running, or "LANJUT: <remaining features>" if anything remains.',
     ].join("\n"),
   };
 }
 
 function pushPhase(s: AltheaState, p: Project, phaseId: string): StackTask {
   const pipe = p.pipeline as NonNullable<Project["pipeline"]>;
-  const { title, prompt } = buildPhasePrompt(phaseId, pipe.goal);
+  const { title, prompt } = buildPhasePrompt(phaseId, pipe.goal, { stack: p.stackSpec, categories: p.categories });
   const t = pushTask(s, `[${p.name}] ${title}`.slice(0, 120), prompt, `pipeline ${phaseId}`, p.name);
   t.phase = phaseId;
   pipe.phases = [...pipe.phases.filter((x) => x.id !== phaseId), { id: phaseId, title, taskId: t.id, done: false }];
@@ -119,7 +156,7 @@ export function startPipeline(
     updatedAt: new Date().toISOString(),
   };
   const first = startAt === "mvp" ? "mvp" : "prd";
-  logEvent(s, `pipeline ${project} mulai (goal: ${p.pipeline.goal.slice(0, 80)})`);
+  logEvent(s, `pipeline ${project} started (goal: ${p.pipeline.goal.slice(0, 80)})`);
   return pushPhase(s, p, first);
 }
 
@@ -154,8 +191,8 @@ export function advancePipeline(
   pipe.updatedAt = new Date().toISOString();
   if (!next) {
     pipe.status = "done";
-    pipe.note = `tamat ${pipe.phases.filter((x) => x.done).length} fase`;
-    logEvent(s, `pipeline ${p.name} SELESAI — siap review rilis`);
+    pipe.note = `finished ${pipe.phases.filter((x) => x.done).length} phases`;
+    logEvent(s, `pipeline ${p.name} DONE — ready for release review`);
     return { finished: true, from: task.phase, to: null };
   }
   const t = pushPhase(s, p, next);
@@ -170,9 +207,9 @@ export function pipelineOnFail(s: AltheaState, taskId: string): { project: strin
   const p = s.projects.find((x) => x.name === t.project);
   if (!p?.pipeline || p.pipeline.status !== "running") return null;
   p.pipeline.status = "failed";
-  p.pipeline.note = `gagal di fase ${t.phase}`;
+  p.pipeline.note = `failed at phase ${t.phase}`;
   p.pipeline.updatedAt = new Date().toISOString();
-  logEvent(s, `pipeline ${p.name} GAGAL di fase ${t.phase}`);
+  logEvent(s, `pipeline ${p.name} FAILED at phase ${t.phase}`);
   return { project: p.name, phase: t.phase };
 }
 
@@ -183,9 +220,9 @@ export function pipelineOnCancel(s: AltheaState, taskId: string): boolean {
   const p = s.projects.find((x) => x.name === t.project);
   if (!p?.pipeline || p.pipeline.status !== "running") return false;
   p.pipeline.status = "paused";
-  p.pipeline.note = `jeda (tugas ${taskId} dibatalkan)`;
+  p.pipeline.note = `paused (task ${taskId} cancelled)`;
   p.pipeline.updatedAt = new Date().toISOString();
-  logEvent(s, `pipeline ${p.name} jeda (tugas ${taskId} dibatalkan)`);
+  logEvent(s, `pipeline ${p.name} paused (task ${taskId} cancelled)`);
   return true;
 }
 
@@ -194,9 +231,9 @@ export function pausePipeline(s: AltheaState, project: string): boolean {
   const p = s.projects.find((x) => x.name === project);
   if (!p?.pipeline || p.pipeline.status !== "running") return false;
   p.pipeline.status = "paused";
-  p.pipeline.note = "dijeda admin";
+  p.pipeline.note = "paused by admin";
   p.pipeline.updatedAt = new Date().toISOString();
-  logEvent(s, `pipeline ${project} jeda`);
+  logEvent(s, `pipeline ${project} paused`);
   return true;
 }
 
@@ -212,14 +249,14 @@ export function resumePipeline(s: AltheaState, project: string): StackTask | nul
   pipe.note = undefined;
   pipe.updatedAt = new Date().toISOString();
   const active = s.stack.some((t) =>
-    t.project === project && t.phase && ["queued", "running", "waiting_approval"].includes(t.status));
+    t.project === project && t.phase && ["queued", "running", "waiting_approval", "waiting_quota"].includes(t.status));
   if (active) {
-    logEvent(s, `pipeline ${project} lanjut`);
+    logEvent(s, `pipeline ${project} resumed`);
     return null;
   }
   const pending = pipe.phases.find((x) => !x.done);
   if (pending) {
-    logEvent(s, `pipeline ${project} lanjut (ulangi ${pending.id})`);
+    logEvent(s, `pipeline ${project} resumed (retry ${pending.id})`);
     return pushPhase(s, p, pending.id);
   }
   const last = pipe.phases[pipe.phases.length - 1];
@@ -228,7 +265,7 @@ export function resumePipeline(s: AltheaState, project: string): StackTask | nul
     pipe.status = "done";
     return null;
   }
-  logEvent(s, `pipeline ${project} lanjut (${last?.id} → ${next})`);
+  logEvent(s, `pipeline ${project} resumed (${last?.id} → ${next})`);
   return pushPhase(s, p, next);
 }
 
@@ -237,11 +274,11 @@ export function cancelPipeline(s: AltheaState, project: string): boolean {
   const p = s.projects.find((x) => x.name === project);
   if (!p?.pipeline || !["running", "paused"].includes(p.pipeline.status)) return false;
   for (const t of s.stack) {
-    if (t.project === project && t.phase) cancelTask(s, t.id, "pipeline dihentikan admin");
+    if (t.project === project && t.phase) cancelTask(s, t.id, "pipeline stopped by admin");
   }
   p.pipeline.status = "failed";
-  p.pipeline.note = "dihentikan admin";
+  p.pipeline.note = "stopped by admin";
   p.pipeline.updatedAt = new Date().toISOString();
-  logEvent(s, `pipeline ${project} dihentikan admin`);
+  logEvent(s, `pipeline ${project} stopped by admin`);
   return true;
 }

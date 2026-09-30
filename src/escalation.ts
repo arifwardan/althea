@@ -16,20 +16,26 @@ export type EscalationAction =
 
 // Kata kunci aksi destruktif/berisiko → keputusan otomatis selalu TOLAK.
 const DESTRUCTIVE =
-  /(hapus|delete|drop|destroy|remove|rm\s+-rf?|format|deploy\s+produksi|production|prod\b|revoke|cabut|buang|buang semua|menimpa|overwrite|reset\s+(db|database|prod)|bayar|transfer|kirim\s+uang)/i;
+  /(hapus|delete|drop|destroy|remove|uninstall|uninstal|deinstal|truncate|rm\s+-rf?|format|factory\s+reset|reset\s+pabrik|shutdown|poweroff|\bhalt\b|matikan\s+(server|laptop|komputer)|wipe|deltree|rd\s+\/s|mkfs|dd\s+if=|deploy\s+produksi|production|prod\b|revoke|cabut|buang|buang semua|menimpa|overwrite|reset\s+(db|database|prod)|bayar|transfer|kirim\s+uang)/i;
+
+/** First risky pattern found in the text, or null. Shared by the approval auto-decide and the /prompt intake gate. */
+export function matchDestructive(text: string): string | null {
+  const m = String(text || "").match(DESTRUCTIVE);
+  return m ? m[0] : null;
+}
 
 /** Keputusan otomatis saat admin diam di kedua kanal. */
 export function autoDecide(question: string): { ok: boolean; reason: string } {
-  const m = question.match(DESTRUCTIVE);
-  if (m) {
+  const hit = matchDestructive(question);
+  if (hit) {
     return {
       ok: false,
-      reason: `ditolak otomatis: terdeteksi aksi berisiko ("${m[0]}") dan tanpa respons admin — default-deny agar aman`,
+      reason: `auto-rejected: risky action detected ("${hit}") with no admin response — default-deny for safety`,
     };
   }
   return {
     ok: true,
-    reason: "disetujui otomatis: aksi non-destruktif dan tanpa respons admin di web maupun Telegram",
+    reason: "auto-approved: non-destructive action with no admin response on web or Telegram",
   };
 }
 
@@ -50,7 +56,7 @@ export function processEscalations(
     if (a.stage === "web" && nowMs - Date.parse(a.createdAt) >= cfg.webMinutes * MIN) {
       a.stage = "telegram";
       a.escalatedAt = new Date(nowMs).toISOString();
-      logEvent(s, `eskalasi ${a.id} web→telegram (tanpa respons ${cfg.webMinutes} mnt)`);
+      logEvent(s, `escalate ${a.id} web→telegram (no response for ${cfg.webMinutes} min)`);
       actions.push({ type: "to-telegram", id: a.id });
     } else if (
       a.stage === "telegram" &&
@@ -59,7 +65,7 @@ export function processEscalations(
       nowMs - Date.parse(a.escalatedAt) >= cfg.tgMinutes * MIN
     ) {
       const d = autoDecide(a.question);
-      logEvent(s, `auto-keputusan ${a.id}: ${d.ok ? "SETUJU" : "TOLAK"} (${d.reason})`.slice(0, 300));
+      logEvent(s, `auto-decision ${a.id}: ${d.ok ? "APPROVE" : "REJECT"} (${d.reason})`.slice(0, 300));
       actions.push({ type: "auto-decide", id: a.id, ok: d.ok, reason: d.reason });
     }
   }

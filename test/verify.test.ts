@@ -43,7 +43,7 @@ describe("runVerifyGates (runner palsu)", () => {
       });
       assert.equal(v.ok, true);
       assert.equal(v.ran, 0);
-      assert.match(v.summary, /dilewati/);
+      assert.match(v.summary, /skipped/);
     } finally {
       rmSync(d, { recursive: true, force: true });
     }
@@ -84,7 +84,7 @@ describe("runVerifyGates (npm asli)", () => {
       const v = await runVerifyGates(d, ["check"], 30_000, realRunCmd);
       assert.equal(v.ok, true);
       assert.equal(v.ran, 1);
-      assert.match(v.summary, /verifier lolos/);
+      assert.match(v.summary, /verifier passed/);
     } finally {
       rmSync(d, { recursive: true, force: true });
     }

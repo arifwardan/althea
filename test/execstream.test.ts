@@ -74,7 +74,7 @@ describe("exec stream", () => {
     const r = s.push(ev("task.lifecycle.failed", {
       event: { kind: "failed", reason: "boom" },
     }));
-    assert.deepEqual(r.activities, [{ kind: "note", text: "gagal: boom" }]);
+    assert.deepEqual(r.activities, [{ kind: "note", text: "failed: boom" }]);
     assert.deepEqual(r.log, ["[!] boom"]);
   });
 });

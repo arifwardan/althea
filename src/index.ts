@@ -4,13 +4,13 @@ import { existsSync } from "node:fs";
 import { config } from "./config.js";
 import { loadState, saveState, logEvent, appendLog, appendActivity } from "./state.js";
 import { addRun, emptyUsage } from "./tokens.js";
-import { peek, markDone, markFailed, noteTimeout, requestApproval, resolveApproval } from "./workflow.js";
+import { peek, markDone, markFailed, noteTimeout, requestApproval, resolveApproval, markWaitingQuota, resumeQuotaTasks, buildAskPrompt } from "./workflow.js";
 import { processEscalations } from "./escalation.js";
 import { isSleeping, forceWake } from "./sleeper.js";
-import { runClaude, enterLimitCooldown, limitDue, brainSummary, effectiveBrain } from "./claude.js";
+import { runClaude, enterLimitCooldown, limitDue, brainSummary, effectiveBrain, effectiveTimeoutSeconds } from "./claude.js";
 import { checkBrain } from "./metrics.js";
 import { projectDir } from "./projects.js";
-import { advancePipeline, pipelineOnFail, graphModeForPhase } from "./pipeline.js";
+import { advancePipeline, pipelineOnFail, graphModeForPhase, reviewBriefForPhase } from "./pipeline.js";
 import { pollTelegram, notifyAdmins, askApproval } from "./telegram.js";
 import { startServer } from "./server.js";
 import { buildReport } from "./report.js";
@@ -44,17 +44,29 @@ async function tick(): Promise<void> {
     } else {
       resolveApproval(state, a.id, act.ok, act.reason, "auto");
       if (!act.ok) pipelineOnFail(state, a.id); // auto-tolak tugas fase → pipeline gagal
-      forceWake(state, `auto-keputusan ${a.id}`);
+      forceWake(state, `auto-decision ${a.id}`);
       save();
       await notifyAdmins(
-        `🤖 KEPUTUSAN OTOMATIS ${act.ok ? "SETUJU ✅" : "TOLAK ⛔"}\n"${a.title}" (${a.id})\n${act.reason}`
+        `Auto-decision: ${act.ok ? "APPROVED" : "REJECTED"}\nTask: "${a.title}" (${a.id})\nReason: ${act.reason}`
       );
     }
   }
 
   if (state.approvals.length > 0) return; // tunggu izin, jangan kerjakan lain
   if (isSleeping(state)) { save(); return; }
+  const inCooldown = !!state.limitCooldownUntil;
   if (!limitDue(state)) { save(); return; } // cooldown limit → resume saat tiba
+  if (inCooldown) {
+    // FR-4.2 + FR-4.3: cooldown kedaluwarsa → tugas waiting_quota lanjut
+    // otomatis tanpa prompt ulang + notifikasi resume (web via event, Telegram).
+    const resumed = resumeQuotaTasks(state);
+    save();
+    if (resumed.length > 0) {
+      await notifyAdmins(
+        `Quota recovered — auto-resume\n${resumed.length} task(s) continuing without re-prompting: ${resumed.map((t) => `"${t.title}" (${t.id})`).join(", ")}.`
+      );
+    }
+  }
   if (working) return;
 
   // Preflight: jangan bakar ronde graph bila perintah otak tak bisa jalan.
@@ -63,11 +75,11 @@ async function tick(): Promise<void> {
     const brain = await checkBrain(effectiveBrain().bin);
     if (!brain.ok) {
       const last = state.events[state.events.length - 1] || "";
-      if (!last.includes("otak tidak ditemukan")) {
-        logEvent(state, `otak tidak ditemukan (${brain.bin}) — cek BRAIN_BIN, tugas ditahan`);
+      if (!last.includes("brain not found")) {
+        logEvent(state, `brain not found (${brain.bin}) — check BRAIN_BIN, tasks held`);
         save();
         await notifyAdmins(
-          `🧠 OTAK TIDAK DITEMUKAN\nPerintah "${brain.bin}" gagal dijalankan. Cek BRAIN_BIN di .env lalu restart server. Tugas ditahan (tidak gagal).`
+          `Brain not found\nCommand "${brain.bin}" failed to run. Check BRAIN_BIN in .env, then restart the server. Tasks are held (not failed).`
         );
       } else {
         save();
@@ -86,9 +98,9 @@ async function tick(): Promise<void> {
   if (top.project) {
     const dir = projectDir(top.project);
     if (!dir || !existsSync(dir)) {
-      markFailed(state, top.id, `project "${top.project}" tidak ada di workspace`);
+      markFailed(state, top.id, `project "${top.project}" is missing from the workspace`);
       save();
-      await notifyAdmins(`❌ Gagal: ${top.title}\nProject "${top.project}" tidak ada di workspace.`);
+      await notifyAdmins(`Failed: ${top.title}\nProject "${top.project}" is missing from the workspace.`);
       return;
     }
     cwd = dir;
@@ -97,7 +109,7 @@ async function tick(): Promise<void> {
   working = true;
   top.status = "running";
   top.attempts += 1;
-  logEvent(state, `run ${top.id} (percobaan ${top.attempts})${cwd ? ` @${top.project}` : ""}`);
+  logEvent(state, `run ${top.id} (attempt ${top.attempts})${cwd ? ` @${top.project}` : ""}`);
   save();
   let lastLogSave = 0;
   const pushLine = (line: string) => {
@@ -116,15 +128,15 @@ async function tick(): Promise<void> {
       if (ids.length) {
         const mr = syncProjectMcps(ids);
         if (mr.changed) logEvent(state, `mcp sync @${top.project}: ${ids.join(",")}`);
-        if (!mr.ok) logEvent(state, `mcp sync @${top.project} gagal: ${mr.error} (lanjut tanpa MCP)`);
+        if (!mr.ok) logEvent(state, `mcp sync @${top.project} failed: ${mr.error} (continuing without MCP)`);
         else for (const st of mr.status) {
           if (st.enabled && st.runnable === false) {
-            logEvent(state, `mcp @${top.project}: "${st.id}" belum runnable — ${st.setupHint}`);
+            logEvent(state, `mcp @${top.project}: "${st.id}" not runnable — ${st.setupHint}`);
           }
         }
       }
     } catch (e) {
-      logEvent(state, `mcp sync @${top.project} gagal: ${String(e)} (lanjut tanpa MCP)`);
+      logEvent(state, `mcp sync @${top.project} failed: ${String(e)} (continuing without MCP)`);
     }
   }
   // Mode graph: plan→implement→gate/review; hasil dinormalisasi ke bentuk runClaude
@@ -138,10 +150,12 @@ async function tick(): Promise<void> {
     const { runGraphTask } = await import("./agent/graph.js");
     const gm = graphModeForPhase(top.phase);
     const g = await runGraphTask({
-      task: top, cwd, maxRounds: config.graphMaxRounds,
+      task: top.askOnly ? { ...top, prompt: buildAskPrompt(top.prompt) } : top,
+      cwd, maxRounds: config.graphMaxRounds,
       autoApprove: config.claudeDryRun,
       planMode: gm?.planMode || config.graphPlanMode,
       reviewMode: gm?.reviewMode || config.graphReviewMode,
+      reviewBrief: reviewBriefForPhase(top.phase),
       verify: config.verifyEnabled && cwd
         ? { scripts: config.verifyScripts, timeoutMs: config.verifyTimeoutMs }
         : false,
@@ -155,15 +169,16 @@ async function tick(): Promise<void> {
     if (g.timedOut) return { ok: false, output: "", hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: true };
     if (!g.approved) {
       const why = g.reviewKind === "gate"
-        ? `gate sistem tak lolos (${config.graphMaxRounds} ronde, tanpa token LLM). Cek diff di panel review.`
-        : `review tak lolos ${config.graphMaxRounds} ronde.`;
+        ? `system gate failed (${config.graphMaxRounds} rounds, zero LLM tokens). Check the diff in the review panel.`
+        : `review failed after ${config.graphMaxRounds} rounds.`;
       return { ok: false, output: `${why} ${g.note}`, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false };
     }
     graphNote = g.note;
     return { ok: true, output: g.outputs.join("\n"), hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false };
   };
   try {
-    const r = config.graphEnabled ? await runGraphMode() : await runClaude(top.prompt, cwd, pushLine, pushActivity);
+    const askPrompt = top.askOnly ? buildAskPrompt(top.prompt) : top.prompt;
+    const r = config.graphEnabled ? await runGraphMode() : await runClaude(askPrompt, cwd, pushLine, pushActivity);
     // Catat pemakaian (juga untuk run yang dibatalkan/limit — token tetap terpakai).
     const charsIn = config.graphEnabled ? graphIn : [...top.prompt].length;
     const charsOut = [...r.output].length;
@@ -177,20 +192,21 @@ async function tick(): Promise<void> {
       save();
       if (action === "retry") {
         await notifyAdmins(
-          `⏱ TIMEOUT ${config.claudeTimeoutSeconds} dtk\n"${top.title}" (${top.id}) diulang otomatis — percobaan ${top.attempts}/${config.taskMaxAttempts}. File yang sudah ditulis aman.`
+          `Timeout (${effectiveTimeoutSeconds().seconds}s)\n"${top.title}" (${top.id}) auto-retried — attempt ${top.attempts}/${config.taskMaxAttempts}. Files already written are safe.`
         );
       } else {
         const pf = pipelineOnFail(state, top.id);
         save();
-        await notifyAdmins(`❌ Gagal: ${top.title}\nTimeout ${config.taskMaxAttempts}× — naikkan CLAUDE_TIMEOUT_SECONDS bila tugas memang besar.` +
-          (pf ? `\nPipeline "${pf.project}" terhenti di fase ${pf.phase}.` : ""));
+        await notifyAdmins(`Failed: ${top.title}\nTimeout ${config.taskMaxAttempts}x — raise the timeout on the dashboard (System → execution_limit) if the task is genuinely large.` +
+          (pf ? `\nPipeline "${pf.project}" stopped at phase ${pf.phase}.` : ""));
       }
     } else if (r.hitLimit) {
-      top.status = "queued"; // JANGAN done/failed: prompt tersimpan → auto-lanjut
+      // FR-4.1: JANGAN done/failed — tugas → waiting_quota, prompt tersimpan → auto-lanjut.
       const until = enterLimitCooldown(state, r.retryAfterMs);
+      markWaitingQuota(state, top.id, until);
       save();
       await notifyAdmins(
-        `⛽ LIMIT TOKEN\nTugas "${top.title}" (${top.id}) ditunda, prompt aman tersimpan.\nResume otomatis: ${until} (±${config.claudeResetHours} jam).\nKetik /bangun untuk cek manual.`
+        `Token limit\nTask "${top.title}" (${top.id}) → waiting_quota, prompt safely stored.\nAuto-resume: ${until} (about ${config.claudeResetHours}h).\nSend /wake to check manually.`
       );
     } else if (r.ok) {
       // Konvensi: output diawali "IZIN:" berarti butuh approve admin.
@@ -201,16 +217,19 @@ async function tick(): Promise<void> {
         save();
       } else {
         markDone(state, top.id, (graphNote || r.output).slice(0, 1000));
+        if (top.askOnly) {
+          await notifyAdmins(`Answer\n"${top.title}"\n\n${(graphNote || r.output).slice(0, 3500)}`);
+        }
         // Tugas fase pipeline → dorong fase berikut (atau tamatkan pipeline).
         const adv = advancePipeline(state, top, r.output);
         save();
         if (adv?.pushed) {
           await notifyAdmins(
-            `🔁 PIPELINE ${top.project}: fase ${adv.from} selesai → lanjut ${adv.to} (${adv.pushed.title}).`
+            `Pipeline ${top.project}: phase ${adv.from} done → continuing to ${adv.to} (${adv.pushed.title}).`
           );
         } else if (adv?.finished) {
           await notifyAdmins(
-            `🚀 PIPELINE SELESAI\nProject "${top.project}" tamat seluruh fase.\nWaktunya review: dashboard → projects → review.`
+            `Pipeline done\nProject "${top.project}" finished all phases.\nNext step: review it on the dashboard → projects → review.`
           );
         }
       }
@@ -218,8 +237,8 @@ async function tick(): Promise<void> {
       markFailed(state, top.id, r.output.slice(0, 500));
       const pf = pipelineOnFail(state, top.id);
       save();
-      await notifyAdmins(`❌ Gagal: ${top.title}\n${r.output.slice(0, 500)}` +
-        (pf ? `\nPipeline "${pf.project}" terhenti di fase ${pf.phase}.` : ""));
+      await notifyAdmins(`Failed: ${top.title}\n${r.output.slice(0, 500)}` +
+        (pf ? `\nPipeline "${pf.project}" stopped at phase ${pf.phase}.` : ""));
     }
   } finally {
     working = false;
@@ -240,4 +259,4 @@ const mati = () => { logEvent(state, "shutdown"); save(); process.exit(0); };
 process.on("SIGINT", mati);
 process.on("SIGTERM", mati);
 
-console.log(`[althea] hidup. loop ${config.loopSeconds}s · reset ±${config.claudeResetHours}h · dry-run=${config.claudeDryRun ? "ya" : "tidak"} · otak ${brainSummary()}`);
+console.log(`[althea] alive. loop ${config.loopSeconds}s · reset ±${config.claudeResetHours}h · dry-run=${config.claudeDryRun ? "yes" : "no"} · brain ${brainSummary()}`);

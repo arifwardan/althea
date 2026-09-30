@@ -75,7 +75,7 @@ describe("workflow stack LIFO + approval", () => {
     assert.equal(resolveApproval(defaultState(), "t_takada", true), false);
   });
   it("stackSummary ramah saat kosong", () => {
-    assert.match(stackSummary(defaultState()), /kosong/);
+    assert.match(stackSummary(defaultState()), /empty/);
   });
 });
 

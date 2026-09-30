@@ -86,7 +86,7 @@ describe("pesan spawn gagal", () => {
   it("ENOENT → sebut perintah + suruh cek BRAIN_BIN", () => {
     const err = Object.assign(new Error("spawn xxx ENOENT"), { code: "ENOENT" });
     const note = spawnErrorNote("xxx", err);
-    assert.match(note, /otak tidak ditemukan/);
+    assert.match(note, /brain not found/);
     assert.match(note, /"xxx"/);
     assert.match(note, /BRAIN_BIN/);
   });

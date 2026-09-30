@@ -15,12 +15,14 @@ const httpGet = (url: string): Promise<{ status: number; body: string }> =>
     }).on("error", reject);
   });
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
   defaultCommand, resolveCommand, splitCmd, claimPort, portOpen,
   resolvePreviewPath, isStaticDir, createPreviewManager, previewUrlFor,
+  isMonorepo, previewNote, isStandardStack, previewKind, siteDomain, siteUrl,
+  linkSite, lerdAvailable,
 } from "../src/preview.js";
 
 const tmp = (files = {}) => {
@@ -47,6 +49,39 @@ describe("command", () => {
     assert.deepEqual(splitCmd(`node server.js --port 9111`), ["node", "server.js", "--port", "9111"]);
     assert.deepEqual(splitCmd(`npm run "dev: watch"`), ["npm", "run", "dev: watch"]);
     assert.deepEqual(splitCmd(`go run .`), ["go", "run", "."]);
+  });
+  it("stack standar = Laravel (artisan + laravel/framework)", () => {
+    const std = tmp({
+      "artisan": "#!/usr/bin/env php",
+      "composer.json": JSON.stringify({ require: { "laravel/framework": "^12.0" } }),
+      "package.json": JSON.stringify({ dependencies: { svelte: "^5.0.0" } }),
+    });
+    assert.equal(isStandardStack(std), true);
+    assert.equal(previewKind("node", std, false), "herd");
+    assert.equal(previewNote("node", std), null);
+    const noArtisan = tmp({ "composer.json": JSON.stringify({ require: { "laravel/framework": "^12.0" } }) });
+    assert.equal(isStandardStack(noArtisan), false);
+    const plain = tmp({ "package.json": JSON.stringify({ scripts: { dev: "vite" } }) });
+    assert.equal(isStandardStack(plain), false);
+  });
+  it("non-standar tanpa command = preview not available", () => {
+    const vite = tmp({ "package.json": JSON.stringify({ scripts: { dev: "vite" } }) });
+    assert.equal(defaultCommand("node", vite), null);
+    assert.equal(previewKind("node", vite, false), "none");
+    assert.match(previewNote("node", vite) || "", /not available/);
+    const dj = tmp({ "manage.py": "x", "requirements.txt": "Django" });
+    assert.equal(defaultCommand("python", dj), null);
+    assert.equal(previewKind("python", dj, false), "none");
+    // Command tersimpan/manual = escape hatch → server.
+    assert.equal(previewKind("node", vite, true), "server");
+    assert.equal(resolveCommand("node", "node custom.js", vite), "node custom.js");
+    const mono = tmp({ "package.json": JSON.stringify({ scripts: { dev: "turbo run dev" } }), "turbo.json": "{}" });
+    assert.match(previewNote("node", mono) || "", /monorepo/);
+  });
+  it("domain lerd aman dari nama project", () => {
+    assert.equal(siteDomain("Simalik"), "simalik.test");
+    assert.equal(siteDomain("pos kasir!"), "pos-kasir.test");
+    assert.equal(siteUrl("simalik"), "https://simalik.test");
   });
 });
 
@@ -121,6 +156,60 @@ describe("manager", () => {
     assert.equal(bad.state, "failed");
     assert.ok(bad.error);
     mgr.stopAll();
+  });
+  it("stop mematikan sepohon proses (cucu tak menahan port)", async () => {
+    if (process.platform === "win32") return; // kill grup proses POSIX saja
+    const mgr = createPreviewManager({ basePort: 9161, readyTimeoutMs: 8000 });
+    try {
+      const dir = tmp({
+        "package.json": JSON.stringify({ scripts: { dev: "node server.js" } }),
+        "server.js": "require('http').createServer((a,b)=>b.end('x')).listen(Number(process.env.PORT),'127.0.0.1');",
+      });
+      const info = await mgr.start("pohon", dir, "npm run dev");
+      assert.equal(info.state, "running");
+      assert.equal(info.port !== null && (await portOpen(info.port, 500)), true);
+      assert.equal(mgr.stop("pohon"), true);
+      let closed = false; // cucu ikut mati → port lepas
+      for (let i = 0; i < 25 && !closed; i++) {
+        closed = !(await portOpen(info.port as number, 300));
+        if (!closed) await new Promise((r) => setTimeout(r, 200));
+      }
+      assert.equal(closed, true);
+    } finally {
+      mgr.stopAll();
+    }
+  });
+  it("link lerd via shim; biner hilang → gagal jujur", async () => {
+    const bin = mkdtempSync(path.join(tmpdir(), "althea-lerd-"));
+    const shim = path.join(bin, "lerd");
+    writeFileSync(shim, "#!/bin/sh\necho linked $2\n");
+    chmodSync(shim, 0o755);
+    const prev = process.env.LERD_BIN;
+    try {
+      process.env.LERD_BIN = shim;
+      assert.equal(await lerdAvailable(), true);
+      const r = await linkSite("simalik", tmp({}));
+      assert.equal(r.ok, true);
+      assert.match(r.output, /linked simalik/);
+      process.env.LERD_BIN = path.join(bin, "tak-ada");
+      assert.equal(await lerdAvailable(), false);
+      const r2 = await linkSite("simalik", tmp({}));
+      assert.equal(r2.ok, false);
+    } finally {
+      if (prev === undefined) delete process.env.LERD_BIN;
+      else process.env.LERD_BIN = prev;
+    }
+  });
+  it("guard: run-script tanpa package.json lokal ditolak (anti-climb)", async () => {
+    const mgr = createPreviewManager({ basePort: 9165, readyTimeoutMs: 3000 });
+    try {
+      const dir = tmp({ "server.js": "x" }); // tanpa package.json
+      const r = await mgr.start("climb", dir, "npm run dev");
+      assert.equal(r.state, "failed");
+      assert.match(r.error || "", /package\.json/);
+    } finally {
+      mgr.stopAll();
+    }
   });
   it("status tanpa proses: statis auto-jalan di port sendiri; server → stopped + cmd", async () => {
     const mgr = createPreviewManager({ basePort: 9191 });

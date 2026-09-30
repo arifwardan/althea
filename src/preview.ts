@@ -12,17 +12,135 @@ export function isStaticDir(dir: string): boolean {
   return existsSync(join(dir, "index.html")) && !existsSync(join(dir, "package.json"));
 }
 
-/** Command default per stack. {port} diganti port alokasi. null = wajib isi manual. */
-export function defaultCommand(stack: string): string | null {
-  if (stack === "node") return "npm run dev"; // PORT+HOST diset via env
-  if (stack === "python") return "python3 -m http.server {port} --bind 127.0.0.1";
-  return null; // go/generic: butuh command kustom (mis. "go run .")
+/** Baca scripts.dev dari package.json; undefined bila tak ada/rusak. */
+export function readDevScript(dir: string): string | undefined {
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { scripts?: Record<string, unknown> };
+    const dev = pkg?.scripts?.dev;
+    return typeof dev === "string" && dev.trim() ? dev.trim() : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
-export function resolveCommand(stack: string, override?: string): string {
+/** Monorepo (turbo/pnpm/npm workspace): preview root tak bisa tebak port satu app. */
+export function isMonorepo(dir: string): boolean {
+  if (existsSync(join(dir, "turbo.json")) || existsSync(join(dir, "pnpm-workspace.yaml"))) return true;
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { workspaces?: unknown };
+    if (pkg?.workspaces) return true;
+  } catch { /* abaikan */ }
+  return /(^|[\s&;])turbo(\s|$)/.test(` ${readDevScript(dir) || ""} `);
+}
+
+/**
+ * Command default per stack. {port} diganti port alokasi. null = wajib isi manual.
+ * Kebijakan: hanya stack NON-standar TANPA dir yang punya default generik
+ * (kompatibel lama). Dengan dir, default otomatis hanya untuk kasus aman;
+ * app non-standar = tanpa default (preview not available, manual bila perlu).
+ */
+export function defaultCommand(stack: string, dir?: string): string | null {
+  if (!dir) {
+    if (stack === "node") return "npm run dev";
+    if (stack === "python") return "python3 -m http.server {port} --bind 127.0.0.1";
+    return null;
+  }
+  if (isStandardStack(dir)) return null; // Laravel standar via lerd, bukan spawn
+  return null; // non-standar: tanpa default (preview not available / manual)
+}
+
+export function resolveCommand(stack: string, override?: string, dir?: string): string {
   const o = (override || "").trim().slice(0, 500);
   if (o) return o;
-  return defaultCommand(stack) || "";
+  return defaultCommand(stack, dir) || "";
+}
+
+/** Stack standar Althea: aplikasi Laravel (disajikan via lerd sebagai namaproject.test). */
+export function isStandardStack(dir: string): boolean {
+  if (!existsSync(join(dir, "artisan"))) return false;
+  try {
+    const c = JSON.parse(readFileSync(join(dir, "composer.json"), "utf8")) as {
+      require?: Record<string, string>; "require-dev"?: Record<string, string>;
+    };
+    return Boolean(c?.require?.["laravel/framework"] || c?.["require-dev"]?.["laravel/framework"]);
+  } catch {
+    return false;
+  }
+}
+
+export type PreviewKind = "static" | "herd" | "server" | "none";
+
+/**
+ * Jenis preview project: static (file, auto), herd (Laravel standar via lerd),
+ * server (punya command tersimpan/manual → spawn), none (preview not available).
+ * hasCmd = ada command tersimpan/eksplisit (escape hatch config manual).
+ */
+export function previewKind(stack: string, dir: string, hasCmd: boolean): PreviewKind {
+  if (isStaticDir(dir)) return "static";
+  if (isStandardStack(dir)) return "herd";
+  if (hasCmd) return "server";
+  return "none";
+}
+
+/** Penjelasan singkat bila preview tak tersedia (ditampilkan di dashboard). null = tersedia. */
+export function previewNote(stack: string, dir: string): string | null {
+  if (previewKind(stack, dir, false) !== "none") return null;
+  if (stack === "node" && isMonorepo(dir)) {
+    return "preview not available — monorepo («npm run dev» at the root starts every app at once). Althea standard: Laravel + Svelte via lerd.";
+  }
+  return "preview not available for this stack — Althea standard: Laravel + Svelte, served via lerd (nameproject.test).";
+}
+
+/** Domain lerd yang aman dari nama project: "Simalik" → "simalik.test". */
+export function siteDomain(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "app";
+  return `${slug}.test`;
+}
+
+/** URL preview untuk stack standar (disajikan lerd, HTTPS). */
+export function siteUrl(name: string): string {
+  return `https://${siteDomain(name)}`;
+}
+
+export interface LerdResult { ok: boolean; output: string }
+
+const lerdBin = (): string => process.env.LERD_BIN || "lerd";
+
+function runCmd(bin: string, args: string[], cwd: string, timeoutMs: number): Promise<LerdResult> {
+  return new Promise((resolve) => {
+    let out = "";
+    let done = false;
+    const finish = (ok: boolean, extra = "") => {
+      if (done) return;
+      done = true;
+      resolve({ ok, output: (out + extra).slice(0, 2000) || `${bin} failed to run` });
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(bin, args, { cwd, shell: false, env: process.env });
+    } catch (e) {
+      resolve({ ok: false, output: `spawn ${bin} failed: ${String(e)}` });
+      return;
+    }
+    const t = setTimeout(() => {
+      try { child.kill("SIGKILL"); } catch { /* abaikan */ }
+      finish(false, "\ntimeout waiting for lerd");
+    }, timeoutMs);
+    child.stdout?.on("data", (d) => { out += String(d); });
+    child.stderr?.on("data", (d) => { out += String(d); });
+    child.on("error", () => { clearTimeout(t); finish(false); });
+    child.on("close", (code) => { clearTimeout(t); finish(code === 0); });
+  });
+}
+
+/** Lerd tersedia di PATH? */
+export async function lerdAvailable(timeoutMs = 10000): Promise<boolean> {
+  return (await runCmd(lerdBin(), ["version"], process.cwd(), timeoutMs)).ok;
+}
+
+/** Daftarkan folder project sebagai site lerd (mis. «simalik» → simalik.test). */
+export async function linkSite(name: string, dir: string, timeoutMs = 60000): Promise<LerdResult> {
+  return runCmd(lerdBin(), ["link", name], dir, timeoutMs);
 }
 
 /** Pecah command ala shell: hormati kutip satu/dua. */
@@ -134,11 +252,11 @@ export function previewMime(full: string): string {
 
 export function readPreviewFile(dir: string, rel: string): { ok: boolean; full?: string; mime?: string; data?: Buffer; error?: string } {
   const full = resolvePreviewPath(dir, rel);
-  if (!full) return { ok: false, error: "file tak ditemukan" };
+  if (!full) return { ok: false, error: "file not found" };
   try {
     return { ok: true, full, mime: previewMime(full), data: readFileSync(full) };
   } catch {
-    return { ok: false, error: "gagal baca file" };
+    return { ok: false, error: "failed to read file" };
   }
 }
 
@@ -222,11 +340,25 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     };
   }
 
+  /**
+   * Matikan SELURUH pohon proses (mis. npm → sh → node). Tanpa ini [hentikan]
+   * hanya membunuh npm sementara dev server cucu tetap jalan + menahan port.
+   * Anak di-spawn detached (group leader sendiri) agar kill(-pid) tepat sasaran.
+   * Windows tak dukung kill grup → fallback kill biasa seperti dulu.
+   */
   function killChild(child: ChildProcess | null): void {
     if (!child || child.killed) return;
-    try { child.kill("SIGTERM"); } catch { /* sudah mati */ }
+    const pid = child.pid;
+    const group = pid !== undefined && process.platform !== "win32";
+    const term = (sig: NodeJS.Signals) => {
+      if (group) {
+        try { process.kill(-(pid as number), sig); return; } catch { /* jatuh ke kill biasa */ }
+      }
+      try { child.kill(sig); } catch { /* sudah mati */ }
+    };
+    term("SIGTERM");
     setTimeout(() => {
-      try { if (!child.killed) child.kill("SIGKILL"); } catch { /* abaikan */ }
+      try { if (!child.killed) term("SIGKILL"); } catch { /* abaikan */ }
     }, 5000);
   }
 
@@ -234,14 +366,22 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     stop(name);
     const parts = splitCmd(cmd);
     if (!parts.length) {
-      return { ...stopped(), state: "failed", error: "command kosong" };
+      return { ...stopped(), state: "failed", error: "empty command" };
     }
     if (recs.size >= maxProcs) {
-      return { ...stopped(), state: "failed", error: `terlalu banyak preview jalan (maks ${maxProcs})` };
+      return { ...stopped(), state: "failed", error: `too many running previews (max ${maxProcs})` };
+    }
+    // Guard: runner skrip tanpa package.json lokal akan naik ke folder induk
+    // dan bisa menjalankan project lain (pernah: preview membuka Althea sendiri).
+    if (/^\s*(npm|bun|pnpm|yarn)\s+run[\s:]/.test(cmd) && !existsSync(join(dir, "package.json"))) {
+      return {
+        ...stopped(), state: "failed",
+        error: "no package.json in the project folder — the runner would climb to the parent folder and might run another project. Enter an explicit command or add a package.json.",
+      };
     }
     const port = await claimPort(basePort, usedPorts);
     if (port === null) {
-      return { ...stopped(), state: "failed", error: "port preview 9111–9200 penuh" };
+      return { ...stopped(), state: "failed", error: "preview ports 9111–9200 are full" };
     }
     usedPorts.add(port);
     const finalCmd = cmd.split("{port}").join(String(port));
@@ -257,12 +397,13 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     try {
       child = spawn(fp[0], fp.slice(1), {
         cwd: dir, shell: false,
+        detached: process.platform !== "win32", // group sendiri → killChild matikan sepohon
         // PORT+HOST umum; HOSTNAME untuk Next.js ("next dev" mengabaikan HOST).
         env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", HOSTNAME: "127.0.0.1" },
       });
     } catch (e) {
       rec.state = "failed";
-      rec.error = `gagal spawn: ${String(e)}`;
+      rec.error = `spawn failed: ${String(e)}`;
       usedPorts.delete(port);
       return toInfo(name, rec);
     }
@@ -273,15 +414,15 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
       pushLog(rec, `spawn error: ${String(e)}`);
       if (rec.state === "starting" || rec.state === "running") {
         rec.state = "failed";
-        rec.error = `proses tak bisa jalan: ${(e as { code?: string })?.code || String(e)} — cek command`;
+        rec.error = `process cannot run: ${(e as { code?: string })?.code || String(e)} — check the command`;
       }
     });
     child.on("close", (code) => {
-      pushLog(rec, `[keluar kode ${code}]`);
+      pushLog(rec, `[exited with code ${code}]`);
       usedPorts.delete(port);
       if (rec.state === "starting" || rec.state === "running") {
         rec.state = "failed";
-        rec.error = rec.error || `proses mati sendiri (kode ${code}) — cek log`;
+        rec.error = rec.error || `process died on its own (code ${code}) — check the log`;
       }
     });
     // Tunggu port merespons; proses hidup tapi port diam = running + reachable=false.
@@ -333,11 +474,11 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
   async function startStatic(name: string, dir: string): Promise<PreviewInfo> {
     stop(name);
     if (recs.size >= maxProcs) {
-      return { ...stopped(), state: "failed", error: `terlalu banyak preview jalan (maks ${maxProcs})` };
+      return { ...stopped(), state: "failed", error: `too many running previews (max ${maxProcs})` };
     }
     const port = await claimPort(basePort, usedPorts);
     if (port === null) {
-      return { ...stopped(), state: "failed", error: "port preview 9111–9200 penuh" };
+      return { ...stopped(), state: "failed", error: "preview ports 9111–9200 are full" };
     }
     const rec: Rec = {
       child: null, http: null, port, cmd: null, dir, mode: "static",
@@ -348,7 +489,7 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     const server = createHttpServer((req, res) => {
       if (req.method !== "GET" && req.method !== "HEAD") {
         res.writeHead(405, { "content-type": "text/plain" });
-        res.end("hanya GET");
+        res.end("GET only");
         return;
       }
       const rawPath = (req.url || "/").split("?")[0];
@@ -356,7 +497,7 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
       if (!f.ok && !extname(rawPath)) f = readPreviewFile(dir, "index.html"); // SPA fallback
       if (!f.ok) {
         res.writeHead(404, { "content-type": "text/plain" });
-        res.end("tidak ada");
+        res.end("not found");
         return;
       }
       res.writeHead(200, {
@@ -368,7 +509,7 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     server.on("error", (e) => {
       if (rec.state === "starting" || rec.state === "running") {
         rec.state = "failed";
-        rec.error = `server statis gagal: ${String(e)}`;
+        rec.error = `static server failed: ${String(e)}`;
       }
     });
     try {
@@ -378,7 +519,7 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
       });
     } catch (e) {
       rec.state = "failed";
-      rec.error = `port ${port} tak bisa dipakai: ${String(e)}`;
+      rec.error = `port ${port} cannot be used: ${String(e)}`;
       return toInfo(name, rec);
     }
     usedPorts.add(port);
@@ -393,7 +534,7 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     if (!rec) {
       // Statis jalan otomatis (ringan, dalam proses) agar selalu bisa dibuka.
       if (isStaticDir(dir)) return startStatic(name, dir);
-      return { ...stopped(), cmd: resolveCommand(stack, savedCmd) || null };
+      return { ...stopped(), cmd: resolveCommand(stack, savedCmd, dir) || null };
     }
     if (rec.mode === "server" && rec.state === "running" && rec.port !== null) {
       rec.reachable = await portOpen(rec.port, 400);

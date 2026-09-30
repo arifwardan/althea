@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { defaultState } from "../src/state.js";
 import { pushTask, requestApproval } from "../src/workflow.js";
-import { autoDecide, processEscalations, stageRemainingMs } from "../src/escalation.js";
+import { autoDecide, matchDestructive, processEscalations, stageRemainingMs } from "../src/escalation.js";
 
 const CFG = { webMinutes: 3, tgMinutes: 3, autodecide: true };
 const MIN = 60_000;
@@ -20,12 +20,25 @@ describe("autoDecide", () => {
     for (const q of ["boleh hapus database produksi?", "jalankan rm -rf /tmp/x", "deploy produksi sekarang?"]) {
       const d = autoDecide(q);
       assert.equal(d.ok, false, q);
-      assert.match(d.reason, /otomatis/);
+      assert.match(d.reason, /auto-/);
     }
   });
   it("non-destruktif → setuju", () => {
     const d = autoDecide("boleh lanjut build staging?");
     assert.equal(d.ok, true);
+  });
+  it("destruktif gaya /prompt → tolak (hapus project, uninstall, drop table)", () => {
+    for (const q of [
+      "hapus project althea",
+      "uninstall aplikasi kasir di laptop",
+      "drop table users",
+      "delete all files",
+      "factory reset laptop",
+    ]) {
+      assert.ok(matchDestructive(q), q);
+      assert.equal(autoDecide(q).ok, false, q);
+    }
+    assert.equal(matchDestructive("buatkan aplikasi kasir sederhana"), null);
   });
 });
 

@@ -1,3 +1,4 @@
+@layer legacy {
 /* Althea console — terminal black-green + grid. Font UI sans; mono untuk terminal/kode. */
 @font-face {
   font-family: "JetBrains Mono";
@@ -165,6 +166,25 @@ body {
 /* ——— panes ——— */
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
 @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } }
+/* Utilitas grid ala Tailwind untuk daftar project (tanpa dependensi baru). */
+.grid-cols-1 { grid-template-columns: minmax(0, 1fr); }
+.gap-4 { gap: 16px; }
+@media (min-width: 768px) { .md\:grid-cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+/* Utilitas split Files tab: 12 kolom, tree 4/8 di desktop, menumpuk di HP. */
+.grid-cols-12 { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+.col-span-12 { grid-column: span 12 / span 12; }
+.overflow-y-auto { overflow-y: auto; }
+.h-\[40vh\] { height: 40vh; }
+@media (min-width: 768px) {
+  .md\:col-span-4 { grid-column: span 4 / span 4; }
+  .md\:col-span-8 { grid-column: span 8 / span 8; }
+  .md\:h-\[80vh\] { height: 80vh; }
+}
+/* Kartu project: selebar sel grid (tanpa w-full), aksi rapi di footer. */
+.pcard { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; background: var(--ink); display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.pcard-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pcard-head .pgrow { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pcard-foot { display: flex; justify-content: flex-end; gap: 6px; }
 .panel {
   background: var(--panel);
   border: 1px solid var(--line-soft);
@@ -193,6 +213,8 @@ body {
 
 .row { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid #122019; font-size: 13px; }
 .row:last-child { border-bottom: 0; }
+/* Kepala panel + review: judul sebaris tombol aksi. */
+.revhead { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
 .k { color: var(--dim); min-width: 140px; flex-shrink: 0; }
 .v-ok { color: var(--grn-hi); }
 .v-warn { color: var(--amb); }
@@ -339,6 +361,41 @@ button.ghost.danger:hover:not(:disabled) { background: rgba(242, 85, 90, 0.12); 
 .termview { max-height: 300px; }
 .minititle { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
 .minititle span { font-size: 12px; font-weight: 500; margin-left: 8px; }
+/* ——— halaman projects ——— */
+.projtop .revhead { border-bottom: 1px solid var(--line-soft); padding-bottom: 12px; margin-bottom: 4px; }
+.projtop h2 { font-size: 17px; }
+.projgrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); margin-top: 12px; }
+.pcard { transition: border-color 0.12s ease; }
+.pcard:hover { border-color: var(--line); }
+.pname { font-size: 15px; font-weight: 700; color: var(--txt); }
+.pstack { font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+.psource { font-size: 11.5px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.minibadges { display: flex; flex-wrap: wrap; gap: 4px; }
+.minibadge { font-size: 11px; padding: 2px 9px; border-radius: 20px; background: rgba(139, 152, 171, 0.12); color: var(--dim); }
+.minibadge.more { background: transparent; border: 1px dashed var(--line); }
+.pcard-foot { justify-content: flex-start; }
+.pempty { color: var(--dim); font-size: 13px; margin-top: 12px; }
+/* section form */
+.fcard { background: var(--ink); border: 1px solid var(--line-soft); border-radius: 10px; padding: 14px 16px; margin-top: 12px; }
+.fsect { font-size: 13px; font-weight: 700; color: var(--txt); margin-bottom: 2px; }
+.fhelp { color: var(--dim); font-size: 12px; margin: 2px 0 8px; }
+.bigname { font-size: 14px; padding: 11px 14px; }
+/* tech stack 2x2 */
+.stackgrid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+@media (max-width: 640px) { .stackgrid2 { grid-template-columns: 1fr; } }
+.stackcell { border: 1px solid var(--line-soft); border-radius: 8px; padding: 8px 10px 10px; }
+.stackdim { font-size: 11.5px; color: var(--dim); margin-bottom: 6px; }
+.optbadges, .pickrow { display: flex; flex-wrap: wrap; gap: 6px; }
+/* badge multi-select (stack + kategori) */
+.pick { font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; background: transparent; border: 1px solid var(--line); color: var(--dim); cursor: pointer; }
+.pick:hover:not(:disabled) { color: var(--txt); filter: none; }
+.pick.on { color: var(--grn-hi); border-color: var(--grn-deep); background: rgba(52, 211, 153, 0.12); }
+/* accordion kategori */
+.catdim { border: 1px solid var(--line-soft); border-radius: 8px; margin-top: 6px; }
+.catdim summary { cursor: pointer; padding: 7px 10px; font-size: 13px; }
+.pickrow { padding: 4px 10px 10px; }
+/* submit menonjol */
+.cta { width: 100%; padding: 12px; font-size: 14px; }
 
 /* ——— meters ——— */
 .bar { flex: 1; height: 8px; background: var(--track); border-radius: 5px; overflow: hidden; min-width: 80px; }
@@ -360,6 +417,7 @@ button.ghost.danger:hover:not(:disabled) { background: rgba(242, 85, 90, 0.12); 
 .treerow { padding: 5px 12px; font-size: 12.5px; cursor: pointer; border-bottom: 1px solid #0e1813; }
 .treerow:hover { background: rgba(52, 211, 153, 0.07); }
 .treerow.sel { background: rgba(52, 211, 153, 0.14); color: #eafff3; }
+.treerow.tdir { color: var(--txt); font-weight: 600; }
 .codeview { max-height: 420px; font-size: 12.5px; }
 .auditrow {
   display: flex;
@@ -483,4 +541,6 @@ button.ghost.danger:hover:not(:disabled) { background: rgba(242, 85, 90, 0.12); 
   .k { min-width: 110px; }
   .hd .clock, .hd .brain-badge, .tagline { display: none; }
   .main { padding: 14px 14px 70px; }
+}
+
 }

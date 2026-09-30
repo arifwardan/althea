@@ -18,6 +18,10 @@ describe("registry", () => {
     assert.equal(pw?.transport, "stdio");
     assert.ok((pw?.command || [])?.join(" ").includes("@playwright/mcp"));
     assert.ok(pw && pw.setupHint.length > 0);
+    const fb = findServer("flowbite", {});
+    assert.equal(fb?.transport, "stdio");
+    assert.deepEqual(fb?.command, ["npx", "-y", "flowbite-mcp"]);
+    assert.deepEqual(toEntry(fb!), { command: "npx", args: ["-y", "flowbite-mcp"] });
     assert.equal(findServer("tak-ada", {}), null);
   });
   it("server kustom via ALTHEA_MCP_SERVERS; entri rusak diabaikan", () => {

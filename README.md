@@ -68,7 +68,7 @@ npm start              # buka http://127.0.0.1:9999 di browser Windows
 Dev harian: `npm run dev` (backend hot-reload) + `npm run dev:web` (dashboard HMR :5173).
 Tes tanpa kuota: `CLAUDE_DRY_RUN=1` di `.env`.
 
-Perintah Telegram: `/status /stack /lapor /tidur <mnt> /bangun /tambah Judul|prompt /setuju <id> /tolak <id> /batal <id>`.
+Telegram commands: `/status /stack /report /sleep <min> /wake /add Title|prompt /ask question /prompt anything /approve <id> /reject <id> /cancel <id>`. `/ask` answers only (changes nothing); `/prompt` runs anything except destructive actions. Write in any language — Althea translates prompts to English.
 
 ## Workspace projects
 

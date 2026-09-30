@@ -10,7 +10,7 @@ import { pushTask, cancelTask } from "../src/workflow.js";
 import { pushFollowup } from "../src/workflow.js";
 import { addBlank, addPrd } from "../src/projects.js";
 import {
-  fiturRound, nextPhase, buildPhasePrompt, graphModeForPhase, startPipelineAuto,
+  fiturRound, nextPhase, buildPhasePrompt, graphModeForPhase, reviewBriefForPhase, startPipelineAuto,
   advancePipeline, pipelineOnFail, pipelineOnCancel,
   pausePipeline, resumePipeline, cancelPipeline,
 } from "../src/pipeline.js";
@@ -55,6 +55,17 @@ describe("transisi fase", () => {
     assert.equal(graphModeForPhase(undefined), null);
     assert.equal(graphModeForPhase("aneh"), null);
   });
+  it("reviewBriefForPhase: hanya rilis yang membawa brief rilis", () => {
+    const brief = reviewBriefForPhase("rilis") as string;
+    assert.match(brief, /Release-scope review/);
+    assert.match(brief, /git history writes/);
+    assert.match(brief, /dependency installs/);
+    assert.match(brief, /explicitly deferred/);
+    assert.match(brief, /do NOT fail the release/);
+    assert.equal(reviewBriefForPhase("fitur-2"), undefined);
+    assert.equal(reviewBriefForPhase("mvp"), undefined);
+    assert.equal(reviewBriefForPhase(undefined), undefined);
+  });
   it("prompt fase memuat instruksi kuncinya", () => {
     const prd = buildPhasePrompt("prd", "pos kasir");
     assert.match(prd.prompt, /PRD\.md/);
@@ -64,9 +75,23 @@ describe("transisi fase", () => {
     const f = buildPhasePrompt("fitur-2", "pos kasir");
     assert.match(f.prompt, /SELESAI/);
     assert.match(f.prompt, /LANJUT/);
-    assert.match(f.title, /ronde 2/);
+    assert.match(f.title, /round 2/);
     const r = buildPhasePrompt("rilis", "pos kasir");
-    assert.match(r.prompt, /siap jual\/deploy/);
+    assert.match(r.prompt, /ready-to-sell\/deploy/);
+  });
+  it("prompt fase membawa stack per lapisan + kategori berlapis", () => {
+    const prd = buildPhasePrompt("prd", "pos kasir", {
+      stack: { be: "laravel", fe: "svelte", db: "postgresql", css: "tailwind" },
+      categories: { fungsi: ["e-commerce"], interaksi: ["transaksional"] },
+    });
+    assert.match(prd.prompt, /BE: laravel, FE: svelte, DB: postgresql, CSS: tailwind/);
+    assert.match(prd.prompt, /fungsi: e-commerce/);
+    assert.match(prd.prompt, /interaksi: transaksional/);
+    const mvp = buildPhasePrompt("mvp", "pos kasir", { stack: { be: "python" } });
+    assert.match(mvp.prompt, /BE: python/);
+    const kosong = buildPhasePrompt("prd", "pos kasir", {});
+    assert.match(kosong.prompt, /BE: laravel/);
+    assert.match(kosong.prompt, /not set/);
   });
 });
 
@@ -180,7 +205,7 @@ describe("tindak lanjut", () => {
     const induk = pushTask(s, "MVP kasir", "buat", "", "kasir");
     const f = pushFollowup(s, induk.id, "tambah diskon");
     assert.equal(f?.project, "kasir");
-    assert.match(f?.title || "", /lanjutan/);
+    assert.match(f?.title || "", /follow-up/);
     assert.match(f?.note || "", new RegExp(induk.id));
     assert.equal(pushFollowup(s, "takada", "x"), null);
     assert.equal(pushFollowup(s, induk.id, "  "), null);

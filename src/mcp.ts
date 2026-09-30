@@ -21,10 +21,17 @@ export interface McpServerDef {
 const BUILTINS: McpServerDef[] = [
   {
     id: "playwright",
-    desc: "Otomasi browser: buka, screenshot, dan klik app hasil generate untuk verifikasi",
+    desc: "Browser automation: open, screenshot, and click the generated app for verification",
     transport: "stdio",
     command: ["npx", "-y", "@playwright/mcp"],
-    setupHint: "npm i -g @playwright/mcp lalu npx playwright install chromium",
+    setupHint: "npm i -g @playwright/mcp then npx playwright install chromium",
+  },
+  {
+    id: "flowbite",
+    desc: "Flowbite UI components in Tailwind CSS: convert Figma designs to code, browse components and blocks",
+    transport: "stdio",
+    command: ["npx", "-y", "flowbite-mcp"],
+    setupHint: "needs network on first run (npx downloads flowbite-mcp); no API key required",
   },
 ];
 
@@ -44,13 +51,13 @@ export function customServers(env: NodeJS.ProcessEnv = process.env): McpServerDe
         if (typeof d.url !== "string" || !d.url) continue;
         out.push({
           id, desc: typeof d.desc === "string" ? d.desc : `MCP ${id} (kustom)`,
-          transport, url: d.url, setupHint: "server HTTP kustom — pastikan URL bisa dijangkau",
+          transport, url: d.url, setupHint: "custom HTTP server — make sure the URL is reachable",
         });
       } else {
         if (!Array.isArray(d.command) || !d.command.length || !d.command.every((c) => typeof c === "string")) continue;
         out.push({
           id, desc: typeof d.desc === "string" ? d.desc : `MCP ${id} (kustom)`,
-          transport, command: d.command as string[], setupHint: `pastikan perintah "${(d.command as string[])[0]}" tersedia di PATH`,
+          transport, command: d.command as string[], setupHint: `make sure "${(d.command as string[])[0]}" is on PATH`,
         });
       }
     }
@@ -115,11 +122,11 @@ export function mergeMcpSettings(
     try {
       const v: unknown = JSON.parse(raw);
       if (!v || typeof v !== "object" || Array.isArray(v)) {
-        return { ok: false, error: "settings.json bukan object — batal tulis" };
+        return { ok: false, error: "settings.json is not an object — write aborted" };
       }
       doc = v as Record<string, unknown>;
     } catch {
-      return { ok: false, error: "settings.json bukan JSON valid — batal tulis" };
+      return { ok: false, error: "settings.json is not valid JSON — write aborted" };
     }
   }
   if (doc.schema_version === undefined) doc.schema_version = 1;
@@ -129,7 +136,7 @@ export function mergeMcpSettings(
     doc.mcpServers = servers;
   }
   if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
-    return { ok: false, error: "mcpServers bukan object — batal tulis (milik user, takut merusak)" };
+    return { ok: false, error: "mcpServers is not an object — write aborted (yours, refusing to corrupt it)" };
   }
   const rec = servers as Record<string, unknown>;
   const before = JSON.stringify(rec);

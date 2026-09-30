@@ -36,6 +36,323 @@ export function detectStack(dir: string): string {
   return "generic";
 }
 
+/**
+ * Tech stack per lapisan. Default Althea = Laravel (BE) + Svelte (FE) +
+ * PostgreSQL (DB) + Tailwind (CSS); kombinasi default disajikan via lerd.
+ */
+export interface StackSpec { fe: string; be: string; db: string; css: string; }
+
+export const DEFAULT_STACK: StackSpec = { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" };
+
+export const STACK_OPTIONS: Record<keyof StackSpec, Array<{ id: string; label: string }>> = {
+  fe: [
+    { id: "svelte", label: "Svelte (default)" },
+    { id: "react", label: "React" },
+    { id: "vue", label: "Vue" },
+    { id: "blade", label: "Blade only (no FE framework)" },
+  ],
+  be: [
+    { id: "laravel", label: "Laravel (default — preview via lerd)" },
+    { id: "node", label: "Node.js" },
+    { id: "python", label: "Python" },
+    { id: "go", label: "Go" },
+  ],
+  db: [
+    { id: "postgresql", label: "PostgreSQL (default)" },
+    { id: "mysql", label: "MySQL" },
+    { id: "sqlite", label: "SQLite" },
+    { id: "none", label: "No database" },
+  ],
+  css: [
+    { id: "tailwind", label: "Tailwind (default)" },
+    { id: "tailwind-shadcn", label: "Tailwind + shadcn/ui" },
+    { id: "bootstrap", label: "Bootstrap" },
+    { id: "plain", label: "Plain CSS" },
+  ],
+};
+
+const STACK_IDS: Record<keyof StackSpec, string[]> = {
+  fe: STACK_OPTIONS.fe.map((o) => o.id),
+  be: STACK_OPTIONS.be.map((o) => o.id),
+  db: STACK_OPTIONS.db.map((o) => o.id),
+  css: STACK_OPTIONS.css.map((o) => o.id),
+};
+
+/** Petakan string stack lama ("laravel"|"node"|...) ke spec per lapisan. */
+function legacyStackString(t: string): StackSpec {
+  if (t === "node") return { ...DEFAULT_STACK, be: "node" };
+  if (t === "python") return { ...DEFAULT_STACK, be: "python" };
+  if (t === "go") return { ...DEFAULT_STACK, be: "go" };
+  return { ...DEFAULT_STACK };
+}
+
+/** Normalisasi pilihan stack user (objek parsial / string lama / kosong → default per lapisan). */
+export function normalizeStackSpec(v: unknown): StackSpec {
+  if (typeof v === "string") {
+    const t = v.trim().toLowerCase();
+    if (!t) return { ...DEFAULT_STACK };
+    if (["laravel", "node", "python", "go", "generic"].includes(t)) return legacyStackString(t);
+    return { ...DEFAULT_STACK };
+  }
+  const o = (v && typeof v === "object" ? v : {}) as Partial<StackSpec>;
+  const pick = (k: keyof StackSpec): string => {
+    const t = String(o[k] || "").trim().toLowerCase();
+    return STACK_IDS[k].includes(t) ? t : DEFAULT_STACK[k];
+  };
+  return { fe: pick("fe"), be: pick("be"), db: pick("db"), css: pick("css") };
+}
+
+/** Kombinasi default penuh (keempat lapisan). */
+export function isDefaultStack(v: unknown): boolean {
+  const s = normalizeStackSpec(v);
+  return s.fe === DEFAULT_STACK.fe && s.be === DEFAULT_STACK.be &&
+    s.db === DEFAULT_STACK.db && s.css === DEFAULT_STACK.css;
+}
+
+/** Preview (lerd) hanya untuk BE Laravel. Kosong = project lama → dianggap default. */
+export function isPreviewStack(v: unknown): boolean {
+  if (v === undefined || v === null) return true;
+  if (typeof v === "string" && !v.trim()) return true;
+  return normalizeStackSpec(v).be === "laravel";
+}
+
+const STACK_LABEL: Record<string, string> = {
+  svelte: "Svelte", react: "React", vue: "Vue", blade: "Blade",
+  laravel: "Laravel", node: "Node.js", python: "Python", go: "Go",
+  postgresql: "PostgreSQL", mysql: "MySQL", sqlite: "SQLite", none: "no DB",
+  tailwind: "Tailwind", "tailwind-shadcn": "Tailwind+shadcn/ui", bootstrap: "Bootstrap", plain: "Plain CSS",
+};
+
+/** Ringkasan satu baris: "Laravel + Svelte + PostgreSQL + Tailwind". */
+export function stackSummary(v: unknown): string {
+  const s = normalizeStackSpec(v);
+  const lbl = (id: string): string => STACK_LABEL[id] || id;
+  return `${lbl(s.be)} + ${lbl(s.fe)} + ${lbl(s.db)} + ${lbl(s.css)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Kategori aplikasi berlapis (fungsi, model bisnis, arsitektur, target, interaksi).
+// Satu aplikasi bisa memegang beberapa nilai per dimensi,
+// mis. E-commerce (fungsi) + B2C (bisnis) + SPA (arsitektur) + Public (target) + Transaksional (interaksi).
+// ---------------------------------------------------------------------------
+
+export const CATEGORY_DIMS = ["fungsi", "bisnis", "arsitektur", "target", "interaksi"] as const;
+export type CategoryDim = (typeof CATEGORY_DIMS)[number];
+export type CategorySet = Record<CategoryDim, string[]>;
+
+export const CATEGORY_TAXONOMY: Record<CategoryDim, Array<{ id: string; label: string }>> = {
+  fungsi: [
+    { id: "e-commerce", label: "E-commerce & Marketplace" },
+    { id: "saas-bisnis", label: "SaaS & Tools Bisnis" },
+    { id: "cms-blog", label: "CMS & Blog" },
+    { id: "sosial-komunitas", label: "Sosial & Komunitas" },
+    { id: "produktivitas", label: "Produktivitas & Kolaborasi" },
+    { id: "edukasi", label: "Pendidikan & E-Learning" },
+    { id: "fintech", label: "Keuangan & Fintech" },
+    { id: "kesehatan", label: "Kesehatan & Fitness" },
+    { id: "travel", label: "Travel & Booking" },
+    { id: "hiburan-media", label: "Hiburan & Media" },
+    { id: "berita-portal", label: "Berita & Portal Informasi" },
+    { id: "pencarian-direktori", label: "Pencarian & Direktori" },
+    { id: "ai-ml", label: "AI & Machine Learning" },
+    { id: "dev-tools", label: "Developer Tools & API" },
+    { id: "admin-internal", label: "Dashboard Admin & Internal Tools" },
+    { id: "pemerintahan", label: "Pemerintahan & Layanan Publik" },
+    { id: "manajemen-proyek", label: "Manajemen Proyek & Task" },
+    { id: "crm-erp", label: "CRM & ERP" },
+    { id: "analitik-bi", label: "Analitik & Business Intelligence" },
+    { id: "portofolio", label: "Portofolio & Personal Branding" },
+    { id: "properti", label: "Properti & Kost" },
+    { id: "kuliner", label: "Kuliner & Resto" },
+  ],
+  bisnis: [
+    { id: "b2b", label: "B2B" },
+    { id: "b2c", label: "B2C" },
+    { id: "c2c", label: "C2C" },
+    { id: "b2b2c", label: "B2B2C" },
+    { id: "saas", label: "SaaS (langganan)" },
+    { id: "marketplace", label: "Marketplace" },
+    { id: "freemium", label: "Freemium" },
+    { id: "iklan", label: "Iklan" },
+    { id: "on-demand", label: "On-demand" },
+  ],
+  arsitektur: [
+    { id: "static", label: "Static Site" },
+    { id: "ssr", label: "Server-Side Rendering (SSR)" },
+    { id: "spa", label: "Single Page Application (SPA)" },
+    { id: "pwa", label: "Progressive Web App (PWA)" },
+    { id: "api-first", label: "API-first" },
+    { id: "microservices", label: "Microservices" },
+    { id: "monolith", label: "Monolith" },
+    { id: "serverless", label: "Serverless" },
+  ],
+  target: [
+    { id: "public", label: "Public" },
+    { id: "internal", label: "Internal" },
+    { id: "partner", label: "Partner" },
+    { id: "admin", label: "Admin" },
+    { id: "customer", label: "Customer" },
+  ],
+  interaksi: [
+    { id: "crud", label: "CRUD" },
+    { id: "real-time", label: "Real-time" },
+    { id: "streaming", label: "Streaming" },
+    { id: "transaksional", label: "Transaksional" },
+    { id: "analitik", label: "Analitik" },
+    { id: "otomasi", label: "Otomasi" },
+  ],
+};
+
+export const CATEGORY_DIM_LABEL: Record<CategoryDim, string> = {
+  fungsi: "Function",
+  bisnis: "Business model",
+  arsitektur: "Arsitektur",
+  target: "Target users",
+  interaksi: "Interaction",
+};
+
+export function emptyCategories(): CategorySet {
+  return { fungsi: [], bisnis: [], arsitektur: [], target: [], interaksi: [] };
+}
+
+const MAX_CAT_PER_DIM = 6;
+
+/** Normalisasi set kategori: rapikan string, buang kosong/duplikat, batasi per dimensi. */
+export function normalizeCategories(v: unknown): CategorySet {
+  const out = emptyCategories();
+  if (!v || typeof v !== "object") return out;
+  const o = v as Partial<Record<CategoryDim, unknown>>;
+  for (const dim of CATEGORY_DIMS) {
+    const raw = o[dim];
+    const arr = Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [];
+    const seen = new Set<string>();
+    for (const item of arr) {
+      const t = String(item || "").trim().toLowerCase().slice(0, 40);
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      out[dim].push(t);
+      if (out[dim].length >= MAX_CAT_PER_DIM) break;
+    }
+  }
+  return out;
+}
+
+/** Apakah set kategori kosong di semua dimensi. */
+export function categoriesEmpty(c: CategorySet): boolean {
+  return CATEGORY_DIMS.every((d) => c[d].length === 0);
+}
+
+const FUNGSI_RULES: Array<[RegExp, string]> = [
+  [/\b(checkout|keranjang|katalog|marketplace|olshop|jualan|toko online|toko)\b/i, "e-commerce"],
+  [/\b(blog|wordpress|cms|ghost|medium)\b/i, "cms-blog"],
+  [/\b(komunitas|forum|feed|pengikut|like|komentar)\b/i, "sosial-komunitas"],
+  [/\b(kolaborasi|dokumen bersama|catatan|wiki|notion|kanban pribadi)\b/i, "produktivitas"],
+  [/\b(sekolah|siswa|guru|kampus|mahasiswa|kursus|pelajaran|belajar|ujian|e-learning|ruangguru)\b/i, "edukasi"],
+  [/\b(pembayaran|dompet|transfer|bank|investasi|asuransi|keuangan|gaji|payroll|invoice|gopay|ovo|stripe)\b/i, "fintech"],
+  [/\b(dokter|pasien|klinik|rumah sakit|obat|apotek|kesehatan|fitness|halodoc|strava)\b/i, "kesehatan"],
+  [/\b(tiket|hotel|wisata|travel|penerbangan|traveloka|airbnb)\b/i, "travel"],
+  [/\b(musik|video|film|podcast|streaming|spotify|netflix|youtube|hiburan)\b/i, "hiburan-media"],
+  [/\b(berita|koran|headline|detik|cnn|kompas|portal berita)\b/i, "berita-portal"],
+  [/\b(pencarian|direktori|yellow pages|yelp|listing usaha)\b/i, "pencarian-direktori"],
+  [/\b(chatbot|\bai\b|kecerdasan buatan|machine learning|generatif|midjourney|rekomendasi cerdas)\b/i, "ai-ml"],
+  [/\b(\bapi\b|sdk|webhook|postman|dokumentasi api|github)\b/i, "dev-tools"],
+  [/\b(dashboard admin|admin panel|hris|absensi|karyawan|staf|internal perusahaan)\b/i, "admin-internal"],
+  [/\b(pajak|e-ktp|pemerintah|desa|kelurahan|surat keterangan|layanan publik|sirup)\b/i, "pemerintahan"],
+  [/\b(sprint|jira|deadline|tugas proyek|clickup|linear)\b/i, "manajemen-proyek"],
+  [/\b(\bcrm\b|\berp\b|sales|lead|odoo|salesforce|sap|inventori|gudang|supplier)\b/i, "crm-erp"],
+  [/\b(grafik|statistik|analitik|business intelligence|tableau|metabase|looker)\b/i, "analitik-bi"],
+  [/\b(portofolio|\bcv\b|personal branding|profil pribadi|behance|linkedin)\b/i, "portofolio"],
+  [/\b(kost|kontrakan|apartemen|properti|sewa (kamar|rumah)|penghuni|simakost)\b/i, "properti"],
+  [/\b(restoran|resto|kafe|cafe|kuliner|resep|order meja)\b/i, "kuliner"],
+  [/\b(kasir|\bpos\b|warung|toko kelontong)\b/i, "e-commerce"],
+];
+
+const BISNIS_RULES: Array<[RegExp, string]> = [
+  [/\b(langganan|subscription|berbayar bulanan|paket premium|berbayar per (bulan|tahun))\b/i, "saas"],
+  [/\b(penjual.*pembeli|multi.?vendor|dua sisi|pasar online)\b/i, "marketplace"],
+  [/\b(dropship|reseller|shopify)\b/i, "b2b2c"],
+  [/\b(gratis.*premium|freemium|batas gratis|upgrade premium)\b/i, "freemium"],
+  [/\b(iklan|adsense|monetisasi iklan|pendapatan iklan)\b/i, "iklan"],
+  [/\b(antar jemput|ojek|on.?demand|sesuai permintaan|pesan antar|gojek|uber)\b/i, "on-demand"],
+  [/\b(antar pengguna|barang bekas|preloved|jual beli antar|olx)\b/i, "c2c"],
+  [/\b(perusahaan|korporat|klien bisnis|untuk (perusahaan|bisnis|kantor))\b/i, "b2b"],
+];
+
+const ARSITEKTUR_RULES: Array<[RegExp, string]> = [
+  [/\b(statis|landing page|jekyll|hugo|html saja)\b/i, "static"],
+  [/\b(react|vue|svelte|\bspa\b|tanpa reload|gmail)\b/i, "spa"],
+  [/\b(\bpwa\b|bisa diinstal|offline|twitter lite)\b/i, "pwa"],
+  [/\b(flutter|react native|\bapi\b.*terpisah|mobile.*api|api-first)\b/i, "api-first"],
+  [/\b(microservice|layanan kecil|layanan terpisah)\b/i, "microservices"],
+  [/\b(lambda|serverless|vercel function|cloud function|edge function)\b/i, "serverless"],
+];
+
+const TARGET_RULES: Array<[RegExp, string]> = [
+  [/\b(karyawan|staf|hris|internal|khusus (karyawan|staf))\b/i, "internal"],
+  [/\b(mitra|supplier|reseller|vendor|portal supplier)\b/i, "partner"],
+  [/\b(pengelola|operator|petugas)\b/i, "admin"],
+  [/\b(nasabah|pelanggan|warga|siswa|pasien|penghuni|penyewa|pembeli)\b/i, "customer"],
+];
+
+const INTERAKSI_RULES: Array<[RegExp, string]> = [
+  [/\b(\bcrud\b|\bkelola\b|tambah.*ubah.*hapus|formulir|pendataan)\b/i, "crud"],
+  [/\b(chat|realtime|real.?time|websocket|notifikasi langsung|live)\b/i, "real-time"],
+  [/\b(streaming|video|audio|musik|film)\b/i, "streaming"],
+  [/\b(bayar|checkout|transaksi|pembayaran|booking|pesanan|tagihan|kasir)\b/i, "transaksional"],
+  [/\b(laporan|grafik|ringkasan|statistik|dashboard)\b/i, "analitik"],
+  [/\b(otomatis|workflow|terjadwal|pengingat|sinkronisasi|zapier)\b/i, "otomasi"],
+];
+
+function matchRules(text: string, rules: Array<[RegExp, string]>, cap = 4): string[] {
+  const out: string[] = [];
+  for (const [re, id] of rules) {
+    if (re.test(text) && !out.includes(id)) {
+      out.push(id);
+      if (out.length >= cap) break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Tebak kategori berlapis dari teks PRD/goal (deterministik, 0 token LLM).
+ * Dipakai saat user mengosongkan kategori — aturan kata kunci per dimensi.
+ */
+export function inferCategories(text: unknown, stack?: StackSpec): CategorySet {
+  const t = String(text || "");
+  const c = emptyCategories();
+  if (!t.trim()) return c;
+  c.fungsi = matchRules(t, FUNGSI_RULES);
+  if (!c.fungsi.length && t.trim()) c.fungsi = ["umum"];
+  c.bisnis = matchRules(t, BISNIS_RULES, 3);
+  c.target = matchRules(t, TARGET_RULES, 2);
+  if (!c.target.length && t.trim()) c.target = ["public"];
+  c.interaksi = matchRules(t, INTERAKSI_RULES);
+  const arch = matchRules(t, ARSITEKTUR_RULES, 3);
+  if (!arch.length) {
+    arch.push("monolith");
+    if ((!stack || stack.be === "laravel") && t.trim()) arch.unshift("ssr");
+  }
+  c.arsitektur = arch;
+  return c;
+}
+
+/**
+ * Kategori final: dimensi yang user isi menang, dimensi kosong ditebak dari teks.
+ * Tanpa teks sumber → dimensi kosong tetap kosong (kecuali pilihan user).
+ */
+export function autoCategories(userCats: unknown, text: unknown, stack?: StackSpec): CategorySet {
+  const user = normalizeCategories(userCats);
+  const src = String(text || "").trim();
+  if (!src) return user;
+  const guessed = inferCategories(src, stack);
+  const out = emptyCategories();
+  for (const dim of CATEGORY_DIMS) {
+    out[dim] = user[dim].length ? user[dim] : guessed[dim];
+  }
+  return out;
+}
+
 /** Saring entri zip berbahaya (zip-slip / absolut / drive Windows). */
 export function safeZipEntries(zip: AdmZip): string[] {
   const out: string[] = [];
@@ -52,7 +369,23 @@ export function safeZipEntries(zip: AdmZip): string[] {
   return out;
 }
 
-function register(s: AltheaState, name: string, source: string): Project {
+export interface ProjectOpts { stack?: unknown; techStack?: unknown; categories?: unknown; category?: unknown; }
+
+/** Set kategori dari opts: objek berlapis menang, string lama → dimensi fungsi. */
+function optsCategories(opts: ProjectOpts, prev: Project | null): CategorySet {
+  const fromOpts = normalizeCategories(
+    opts.categories ?? (opts.category !== undefined ? { fungsi: [opts.category] } : undefined),
+  );
+  if (!categoriesEmpty(fromOpts)) return fromOpts;
+  if (prev?.categories && !categoriesEmpty(normalizeCategories(prev.categories))) {
+    return normalizeCategories(prev.categories);
+  }
+  const legacy = String((prev as { category?: unknown } | null)?.category || "").trim();
+  if (legacy) return normalizeCategories({ fungsi: [legacy] });
+  return emptyCategories();
+}
+
+function register(s: AltheaState, name: string, source: string, opts: ProjectOpts = {}): Project {
   mkdirSync(config.workspaceDir, { recursive: true });
   const dir = projectDir(name) as string;
   const stack = detectStack(dir);
@@ -61,6 +394,10 @@ function register(s: AltheaState, name: string, source: string): Project {
   const prevProj = prev >= 0 ? s.projects[prev] : null;
   const proj: Project = {
     name, source, stack, addedAt: prevProj ? prevProj.addedAt : now,
+    stackSpec: normalizeStackSpec(
+      opts.stack ?? opts.techStack ?? prevProj?.stackSpec ?? (prevProj as { techStack?: unknown } | null)?.techStack,
+    ),
+    categories: optsCategories(opts, prevProj),
     ...(prevProj?.pipeline ? { pipeline: prevProj.pipeline } : {}),
     ...(prevProj?.mcps ? { mcps: prevProj.mcps } : {}),
     ...(prevProj?.previewCmd ? { previewCmd: prevProj.previewCmd } : {}),
@@ -72,11 +409,11 @@ function register(s: AltheaState, name: string, source: string): Project {
 }
 
 /** Clone repo ke workspace/<name>. Gagal → {ok:false, error}. */
-export function addFromRepo(s: AltheaState, name: string, repoUrl: string): Promise<{ ok: boolean; error?: string; project?: Project }> {
+export function addFromRepo(s: AltheaState, name: string, repoUrl: string, opts: ProjectOpts = {}): Promise<{ ok: boolean; error?: string; project?: Project }> {
   const dir = projectDir(name);
-  if (!dir) return Promise.resolve({ ok: false, error: "nama project tidak valid" });
-  if (!validRepoUrl(repoUrl)) return Promise.resolve({ ok: false, error: "URL repo tidak valid (https://… atau git@host:path.git)" });
-  if (existsSync(dir)) return Promise.resolve({ ok: false, error: `folder "${name}" sudah ada` });
+  if (!dir) return Promise.resolve({ ok: false, error: "invalid project name" });
+  if (!validRepoUrl(repoUrl)) return Promise.resolve({ ok: false, error: "invalid repo URL (https://… or git@host:path.git)" });
+  if (existsSync(dir)) return Promise.resolve({ ok: false, error: `folder "${name}" already exists` });
   mkdirSync(config.workspaceDir, { recursive: true });
   return new Promise((resolve) => {
     const child = spawn(config.gitBin, ["clone", "--depth", "1", repoUrl.trim(), dir], {
@@ -85,36 +422,36 @@ export function addFromRepo(s: AltheaState, name: string, repoUrl: string): Prom
     });
     let err = "";
     child.stderr.on("data", (d) => { err += String(d); });
-    child.on("error", (e) => resolve({ ok: false, error: `git gagal dijalankan: ${String(e).slice(0, 200)}` }));
+    child.on("error", (e) => resolve({ ok: false, error: `git failed to run: ${String(e).slice(0, 200)}` }));
     child.on("close", (code) => {
       if (code !== 0) {
         rmSync(dir, { recursive: true, force: true });
-        resolve({ ok: false, error: `git clone gagal (exit ${code}): ${err.slice(0, 300)}` });
+        resolve({ ok: false, error: `git clone failed (exit ${code}): ${err.slice(0, 300)}` });
         return;
       }
-      resolve({ ok: true, project: register(s, name, repoUrl.trim()) });
+      resolve({ ok: true, project: register(s, name, repoUrl.trim(), opts) });
     });
   });
 }
 
 /** Ekstrak buffer zip ke workspace/<name>. */
 export function addFromZip(
-  s: AltheaState, name: string, fileName: string, buf: Buffer
+  s: AltheaState, name: string, fileName: string, buf: Buffer, opts: ProjectOpts = {}
 ): { ok: boolean; error?: string; project?: Project } {
   const dir = projectDir(name);
-  if (!dir) return { ok: false, error: "nama project tidak valid" };
-  if (existsSync(dir)) return { ok: false, error: `folder "${name}" sudah ada` };
+  if (!dir) return { ok: false, error: "invalid project name" };
+  if (existsSync(dir)) return { ok: false, error: `folder "${name}" already exists` };
   if (buf.length > config.projectMaxMb * 1024 * 1024) {
-    return { ok: false, error: `zip melebihi batas ${config.projectMaxMb} MB` };
+    return { ok: false, error: `zip exceeds the ${config.projectMaxMb} MB` };
   }
   let zip: AdmZip;
   try {
     zip = new AdmZip(buf);
   } catch {
-    return { ok: false, error: "bukan file zip yang valid" };
+    return { ok: false, error: "not a valid zip file" };
   }
   const entries = safeZipEntries(zip);
-  if (entries.length === 0) return { ok: false, error: "zip kosong / semua entri ditolak" };
+  if (entries.length === 0) return { ok: false, error: "zip is empty / all entries rejected" };
   mkdirSync(dir, { recursive: true });
   try {
     // Ekstrak hanya entri aman; bungkus root tunggal (repo-zip GitHub) dirapikan.
@@ -137,9 +474,9 @@ export function addFromZip(
     }
   } catch (e) {
     rmSync(dir, { recursive: true, force: true });
-    return { ok: false, error: `gagal ekstrak zip: ${String(e).slice(0, 200)}` };
+    return { ok: false, error: `zip extraction failed: ${String(e).slice(0, 200)}` };
   }
-  return { ok: true, project: register(s, name, `zip:${fileName}`.slice(0, 120)) };
+  return { ok: true, project: register(s, name, `zip:${fileName}`.slice(0, 120), opts) };
 }
 
 /** Git init + commit awal, best-effort (tak pernah throw): agar diff/review langsung berguna. */
@@ -156,39 +493,43 @@ export function ensureGitRepo(dir: string): Promise<void> {
 
 /** Buat project kosong dari nama saja (folder + README stub + git init). */
 export async function addBlank(
-  s: AltheaState, name: string, goal = ""
+  s: AltheaState, name: string, goal = "", opts: ProjectOpts = {}
 ): Promise<{ ok: boolean; error?: string; project?: Project }> {
   const dir = projectDir(name);
-  if (!dir) return { ok: false, error: "nama project tidak valid" };
-  if (existsSync(dir)) return { ok: false, error: `folder "${name}" sudah ada` };
+  if (!dir) return { ok: false, error: "invalid project name" };
+  if (existsSync(dir)) return { ok: false, error: `folder "${name}" already exists` };
   mkdirSync(dir, { recursive: true });
   const g = goal.trim().slice(0, 500);
   writeFileSync(join(dir, "README.md"), `# ${name}\n\n${g ? `> ${g}\n\n` : ""}*Dibuat oleh Althea.*\n`);
   await ensureGitRepo(dir);
-  return { ok: true, project: register(s, name, "blank") };
+  const spec = normalizeStackSpec(opts.stack ?? opts.techStack);
+  const cats = autoCategories(opts.categories ?? opts.category, g, spec);
+  return { ok: true, project: register(s, name, "blank", { stack: spec, categories: cats }) };
 }
 
 /** Buat project dari file PRD user (disimpan sebagai PRD.md). */
 export async function addPrd(
-  s: AltheaState, name: string, fileName: string, buf: Buffer
+  s: AltheaState, name: string, fileName: string, buf: Buffer, opts: ProjectOpts = {}
 ): Promise<{ ok: boolean; error?: string; project?: Project }> {
   const dir = projectDir(name);
-  if (!dir) return { ok: false, error: "nama project tidak valid" };
-  if (existsSync(dir)) return { ok: false, error: `folder "${name}" sudah ada` };
-  if (buf.includes(0)) return { ok: false, error: "bukan file teks" };
+  if (!dir) return { ok: false, error: "invalid project name" };
+  if (existsSync(dir)) return { ok: false, error: `folder "${name}" already exists` };
+  if (buf.includes(0)) return { ok: false, error: "not a text file" };
   const clean = buf.toString("utf8").replace(/^\uFEFF/, "").trim();
-  if (!clean) return { ok: false, error: "isi PRD kosong" };
-  if (clean.length > 200_000) return { ok: false, error: "PRD melebihi 200 KB" };
+  if (!clean) return { ok: false, error: "PRD is empty" };
+  if (clean.length > 200_000) return { ok: false, error: "PRD exceeds 200 KB" };
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "PRD.md"), clean.slice(0, 200_000));
   await ensureGitRepo(dir);
-  return { ok: true, project: register(s, name, `prd:${fileName}`.slice(0, 120)) };
+  const spec = normalizeStackSpec(opts.stack ?? opts.techStack);
+  const cats = autoCategories(opts.categories ?? opts.category, clean, spec);
+  return { ok: true, project: register(s, name, `prd:${fileName}`.slice(0, 120), { stack: spec, categories: cats }) };
 }
 
 /** Hapus project (folder + registry). */
 export function removeProject(s: AltheaState, name: string): { ok: boolean; error?: string } {
   const dir = projectDir(name);
-  if (!dir) return { ok: false, error: "nama project tidak valid" };
+  if (!dir) return { ok: false, error: "invalid project name" };
   rmSync(dir, { recursive: true, force: true });
   s.projects = s.projects.filter((p) => p.name !== name);
   logEvent(s, `project -${name}`);
@@ -202,8 +543,8 @@ export interface FileEntry { path: string; size: number; }
 /** Pohon file project (maksimal 200 entri; lewati folder berat). */
 export function listFiles(name: string, max = 200): { ok: boolean; error?: string; files?: FileEntry[] } {
   const dir = projectDir(name);
-  if (!dir) return { ok: false, error: "nama project tidak valid" };
-  if (!existsSync(dir)) return { ok: false, error: "project tidak ada" };
+  if (!dir) return { ok: false, error: "invalid project name" };
+  if (!existsSync(dir)) return { ok: false, error: "project does not exist" };
   const out: FileEntry[] = [];
   const walk = (rel: string): void => {
     if (out.length >= max) return;
@@ -311,11 +652,11 @@ export function startFileWatch(
         if (!prev && !emitted.has(`+${rel}`)) {
           emitted.add(`+${rel}`);
           count += 1;
-          onChange("file", `baru: ${rel}`);
+          onChange("file", `new: ${rel}`);
         } else if (prev && (prev.mtimeMs !== cur.mtimeMs || prev.size !== cur.size) && !emitted.has(`~${rel}`)) {
           emitted.add(`~${rel}`);
           count += 1;
-          onChange("file", `ubah: ${rel}`);
+          onChange("file", `modified: ${rel}`);
         }
       }
       before = after;
@@ -329,16 +670,16 @@ export function startFileWatch(
 /** Isi file teks project (maks 200 KB; tolak biner & traversal). */
 export function readProjectFile(name: string, relPath: string): { ok: boolean; error?: string; content?: string } {
   const dir = projectDir(name);
-  if (!dir) return { ok: false, error: "nama project tidak valid" };
+  if (!dir) return { ok: false, error: "invalid project name" };
   const target = resolve(join(dir, relPath));
-  if (target !== dir && !target.startsWith(dir + sep)) return { ok: false, error: "path di luar project" };
+  if (target !== dir && !target.startsWith(dir + sep)) return { ok: false, error: "path is outside the project" };
   let st;
   try {
     st = statSync(target);
-  } catch { return { ok: false, error: "file tidak ada" }; }
-  if (!st.isFile() || st.size > 200 * 1024) return { ok: false, error: "bukan file teks ≤200 KB" };
+  } catch { return { ok: false, error: "file does not exist" }; }
+  if (!st.isFile() || st.size > 200 * 1024) return { ok: false, error: "not a text file ≤200 KB" };
   const buf = readFileSync(target);
-  if (buf.includes(0)) return { ok: false, error: "file biner" };
+  if (buf.includes(0)) return { ok: false, error: "binary file" };
   return { ok: true, content: buf.toString("utf8").slice(0, 200_000) };
 }
 
@@ -384,8 +725,8 @@ export async function projectDiff(name: string): Promise<{ repo: boolean; stat?:
     git(["diff", "HEAD", "--no-color", "-U3"], dir),
     git(["status", "--short"], dir),
   ]);
-  const untracked = status.out.split("\n").filter((l) => l.startsWith("??")).map((l) => `baru: ${l.slice(3)}`);
-  const statText = [stat.out.trim(), ...untracked].filter(Boolean).join("\n") || "(bersih — tanpa perubahan)";
+  const untracked = status.out.split("\n").filter((l) => l.startsWith("??")).map((l) => `new: ${l.slice(3)}`);
+  const statText = [stat.out.trim(), ...untracked].filter(Boolean).join("\n") || "(clean — no changes)";
   return { repo: true, stat: statText, diff: diff.out };
 }
 

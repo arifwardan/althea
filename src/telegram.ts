@@ -5,6 +5,7 @@ import { config } from "./config.js";
 import type { AltheaState } from "./state.js";
 import { logEvent } from "./state.js";
 import { pushTask, resolveApproval, cancelTask, stackSummary } from "./workflow.js";
+import { matchDestructive } from "./escalation.js";
 import { pipelineOnFail, pipelineOnCancel } from "./pipeline.js";
 import { killRunning } from "./claude.js";
 import { goSleep, forceWake, isSleeping } from "./sleeper.js";
@@ -39,13 +40,13 @@ export async function askApproval(
   taskId: string, title: string, question: string, deadlineMinutes = 3
 ): Promise<void> {
   const text =
-    `🔐 IZIN DIPERLUKAN (dari web, tanpa respons)\n${title}\nID: ${taskId}\n\n${question}\n\n` +
-    `Balas /setuju ${taskId} atau /tolak ${taskId} alasan\n` +
-    `⏳ Tanpa respons ${deadlineMinutes} menit → Althea memutuskan sendiri.`;
+    `Approval needed\nTask: ${title} (${taskId})\n\n${question}\n\n` +
+    `Reply /approve ${taskId} or /reject ${taskId} <reason>\n` +
+    `No reply within ${deadlineMinutes} min → Althea decides alone.`;
   const markup = {
     inline_keyboard: [[
-      { text: "✅ Setuju", callback_data: `ok:${taskId}` },
-      { text: "⛔ Tolak", callback_data: `no:${taskId}` },
+      { text: "Approve", callback_data: `ok:${taskId}` },
+      { text: "Reject", callback_data: `no:${taskId}` },
     ]],
   };
   await notifyAdmins(text, markup);
@@ -69,65 +70,103 @@ async function answerCallback(id: string, text: string): Promise<void> {
   } catch { /* abaikan */ }
 }
 
-async function handleCommand(s: AltheaState, chatId: number, text: string, save: () => void): Promise<string> {
+export async function handleCommand(s: AltheaState, chatId: number, text: string, save: () => void): Promise<string> {
   const [cmd, ...rest] = text.trim().split(/\s+/);
   const arg = rest.join(" ");
   switch (cmd) {
     case "/status": {
-      const tidur = isSleeping(s) ? `😴 tidur s/d ${s.sleepUntil}` : "🟢 aktif";
-      const limit = s.limitCooldownUntil ? `\n⏳ cooldown limit s/d ${s.limitCooldownUntil}` : "";
-      return `${tidur}${limit}\nApproval pending: ${s.approvals.length}\nTugas di stack: ${s.stack.length}`;
+      const lines = [
+        isSleeping(s) ? `Status: sleeping until ${s.sleepUntil}` : "Status: active",
+        ...(isSleeping(s) ? ["Wakes for: Telegram, approvals, resets"] : []),
+        ...(s.limitCooldownUntil ? [`Limit cooldown until: ${s.limitCooldownUntil}`] : []),
+        `Pending approvals: ${s.approvals.length}`,
+        `Tasks on stack: ${s.stack.length}`,
+      ];
+      return lines.join("\n");
     }
     case "/stack":
       return stackSummary(s);
-    case "/lapor":
+    case "/report":
       return buildReport(s);
-    case "/tidur": {
+    case "/sleep": {
       const mnt = Number(rest[0]) || 60;
       const until = goSleep(s, mnt);
       save();
-      return `😴 Tidur ${mnt} mnt (s/d ${until}). Tetap bangun untuk Telegram/approval/reset.`;
+      return `Sleeping for ${mnt} min (until ${until}).\nStill wakes for Telegram, approvals, and resets.`;
     }
-    case "/bangun":
-      forceWake(s, "perintah /bangun");
+    case "/wake":
+      forceWake(s, "/wake command");
       save();
-      return "🟢 Bangun. Loop lanjut.";
-    case "/tambah": {
+      return "Awake. Loop continues.";
+    case "/add": {
       const i = arg.indexOf("|");
-      if (i < 0) return "Format: /tambah Judul | prompt lengkap";
+      if (i < 0) return "Usage: /add Title | full prompt (any language — Althea translates it to English)";
       const t = pushTask(s, arg.slice(0, i).trim(), arg.slice(i + 1).trim(), "via telegram");
-      forceWake(s, "tugas baru");
+      forceWake(s, "new task");
       save();
-      return `➕ Masuk stack: ${t.id} — ${t.title}`;
+      return `Queued: ${t.id} — ${t.title}`;
     }
-    case "/setuju": {
+    case "/ask": {
+      const q = arg.trim();
+      if (!q) return "Usage: /ask <question> (any language — answered only, nothing is changed)";
+      const t = pushTask(s, `ask: ${q.slice(0, 60)}`, q, "via telegram", undefined, undefined, { askOnly: true });
+      forceWake(s, "new ask task");
+      save();
+      return `Queued: ${t.id} — the answer will be sent here. Nothing will be changed.`;
+    }
+    case "/prompt": {
+      const p = arg.trim();
+      if (!p) return "Usage: /prompt <text> (any language — except destructive actions)";
+      const hit = matchDestructive(p);
+      if (hit) {
+        return `Rejected: destructive prompt (matched "${hit}").\nRephrase without delete/uninstall/format/drop/shutdown actions, or run it step by step from the dashboard where you approve each action.`;
+      }
+      const t = pushTask(s, p.slice(0, 60) || "telegram prompt", p, "via telegram");
+      forceWake(s, "new task");
+      save();
+      return `Queued: ${t.id} — ${t.title}`;
+    }
+    case "/approve": {
       const id = rest[0] || "";
-      const ok = resolveApproval(s, id, true, "disetujui admin", "admin-telegram");
+      const ok = resolveApproval(s, id, true, "approved by admin", "admin-telegram");
       if (ok) forceWake(s, `approval ${id}`);
       save();
-      return ok ? `✅ ${id} disetujui → lanjut.` : `ID ${id} tidak ditemukan.`;
+      return ok ? `Approved ${id} — continuing.` : `ID ${id} not found.`;
     }
-    case "/tolak": {
+    case "/reject": {
       const id = rest[0] || "";
-      const alasan = rest.slice(1).join(" ") || "ditolak via Telegram";
+      const alasan = rest.slice(1).join(" ") || "rejected via Telegram";
       const ok = resolveApproval(s, id, false, alasan, "admin-telegram");
       if (ok) pipelineOnFail(s, id);
       save();
-      return ok ? `⛔ ${id} ditolak.` : `ID ${id} tidak ditemukan.`;
+      return ok ? `Rejected ${id}.` : `ID ${id} not found.`;
     }
-    case "/batal": {
+    case "/cancel": {
       const id = rest[0] || "";
       killRunning();
-      const ok = cancelTask(s, id, "dibatalkan via Telegram");
+      const ok = cancelTask(s, id, "cancelled via Telegram");
       if (ok) {
         pipelineOnCancel(s, id);
-        forceWake(s, `batal ${id}`);
+        forceWake(s, `cancel ${id}`);
       }
       save();
-      return ok ? `🛑 ${id} dibatalkan.` : `ID ${id} tidak aktif.`;
+      return ok ? `Cancelled ${id}.` : `ID ${id} is not active.`;
     }
     default:
-      return "Perintah: /status /stack /lapor /tidur <mnt> /bangun /tambah J|prompt /setuju <id> /tolak <id> /batal <id>";
+      return [
+        "Commands:",
+        "/status — runtime status",
+        "/stack — task stack",
+        "/report — full report",
+        "/sleep <min> — sleep (default 60)",
+        "/wake — wake up",
+        "/add Title | prompt — run a task",
+        "/ask <question> — answer only, changes nothing",
+        "/prompt <text> — run anything except destructive actions",
+        "/approve <id> — approve",
+        "/reject <id> — reject",
+        "/cancel <id> — cancel a task",
+      ].join("\n");
   }
 }
 
@@ -144,15 +183,15 @@ export async function pollTelegram(s: AltheaState, save: () => void): Promise<vo
       // Tombol inline approve/reject
       if (u.callback_query?.data) {
         const chatId = u.callback_query.message?.chat.id ?? 0;
-        if (!isAdmin(chatId)) { await answerCallback(u.callback_query.id, "Bukan admin."); continue; }
+        if (!isAdmin(chatId)) { await answerCallback(u.callback_query.id, "Not an admin."); continue; }
         const [aksi, id] = u.callback_query.data.split(":");
         if (aksi === "ok" || aksi === "no") {
-          const ok = resolveApproval(s, id, aksi === "ok", aksi === "ok" ? "tombol setuju" : "tombol tolak", "admin-telegram");
+          const ok = resolveApproval(s, id, aksi === "ok", aksi === "ok" ? "approve button" : "reject button", "admin-telegram");
           if (ok && aksi === "ok") forceWake(s, `approval ${id}`);
           if (ok && aksi === "no") pipelineOnFail(s, id);
           save();
-          await answerCallback(u.callback_query.id, ok ? (aksi === "ok" ? "Disetujui." : "Ditolak.") : "ID tidak ada.");
-          if (chatId) await tgSend(String(chatId), ok ? (aksi === "ok" ? `✅ ${id} lanjut.` : `⛔ ${id} ditolak.`) : "ID tidak dikenal.");
+          await answerCallback(u.callback_query.id, ok ? (aksi === "ok" ? "Approved." : "Rejected.") : "No such ID.");
+          if (chatId) await tgSend(String(chatId), ok ? (aksi === "ok" ? `Approved ${id} — continuing.` : `Rejected ${id}.`) : "Unknown ID.");
         }
         continue;
       }
@@ -160,7 +199,7 @@ export async function pollTelegram(s: AltheaState, save: () => void): Promise<vo
       if (!msg?.text) continue;
       const chatId = msg.chat.id;
       if (!isAdmin(chatId)) continue;
-      forceWake(s, "pesan telegram"); // tidur pun bangun saat admin menyapa
+      forceWake(s, "telegram message"); // tidur pun bangun saat admin menyapa
       const balas = await handleCommand(s, chatId, msg.text, save);
       logEvent(s, `tg ${chatId}: ${msg.text.slice(0, 80)}`);
       await tgSend(String(chatId), balas);
