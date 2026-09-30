@@ -7,14 +7,14 @@ import { logEvent } from "./state.js";
 export function goSleep(s: AltheaState, minutes: number): string {
   const until = new Date(Date.now() + Math.max(1, minutes) * 60_000).toISOString();
   s.sleepUntil = until;
-  logEvent(s, `tidur sampai ${until}`);
+  logEvent(s, `sleep until ${until}`);
   return until;
 }
 
 export function forceWake(s: AltheaState, why: string): void {
   if (!s.sleepUntil) return;
   s.sleepUntil = null;
-  logEvent(s, `bangun: ${why}`.slice(0, 200));
+  logEvent(s, `wake: ${why}`.slice(0, 200));
 }
 
 /** true = masih tidur (loop utama harus skip eksekusi Muse). */
@@ -22,7 +22,7 @@ export function isSleeping(s: AltheaState, now = new Date()): boolean {
   if (!s.sleepUntil) return false;
   if (new Date(s.sleepUntil).getTime() <= now.getTime()) {
     s.sleepUntil = null; // kedaluwarsa → bangun otomatis
-    logEvent(s, "bangun otomatis (jadwal tiba)");
+    logEvent(s, "auto-wake (schedule reached)");
     return false;
   }
   return true;

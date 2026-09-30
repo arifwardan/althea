@@ -45,11 +45,14 @@ Dashboard memakai **Svelte 5 + Vite** (build statis ±100 KB, tanpa framework ru
    Anthropic tak mempublikasikan tokenizer Muse, jadi Althea menghitung karakter
    pasti + estimasi token (≈3,5 char/token). Tampil per tugas, total di laporan,
    dan di dashboard. Bukan angka exact — labelnya selalu estimasi.
+9. **Timeout + antre-ulang otomatis** — satu eksekusi Muse dibatasi
+   `CLAUDE_TIMEOUT_SECONDS` (default 1800); timeout → tugas diantre-ulang
+   (file yang sudah ditulis aman) sampai `TASK_MAX_ATTEMPTS` (default 3).
 
 ## Jalankan di laptop (WSL Ubuntu)
 
 Otak = `muse exec` (langganan Meta), jadi server jalan di WSL tempat `muse` + loginmu berada.
-Dashboard tetap dibuka di browser Windows (`http://127.0.0.1:3000` terus ke WSL otomatis).
+Dashboard tetap dibuka di browser Windows (`http://127.0.0.1:9999` terus ke WSL otomatis).
 
 ```bash
 cp .env.example .env   # isi TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_IDS, ADMIN_PASSWORD
@@ -59,21 +62,56 @@ mkdir -p ~/.local/node && tar -xf node-v20.19.0-linux-x64.tar.xz -C ~/.local/nod
 echo 'export PATH="$HOME/.local/node/bin:$PATH"' >> ~/.bashrc && export PATH="$HOME/.local/node/bin:$PATH"
 npm install
 npm run build          # build dashboard Svelte + backend
-npm start              # buka http://127.0.0.1:3000 di browser Windows
+npm start              # buka http://127.0.0.1:9999 di browser Windows
 ```
 
 Dev harian: `npm run dev` (backend hot-reload) + `npm run dev:web` (dashboard HMR :5173).
 Tes tanpa kuota: `CLAUDE_DRY_RUN=1` di `.env`.
 
-Perintah Telegram: `/status /stack /lapor /tidur <mnt> /bangun /tambah Judul|prompt /setuju <id> /tolak <id> /batal <id>`.
+Telegram commands: `/status /stack /report /sleep <min> /wake /add Title|prompt /ask question /prompt anything /approve <id> /reject <id> /cancel <id>`. `/ask` answers only (changes nothing); `/prompt` runs anything except destructive actions. Write in any language — Althea translates prompts to English.
 
 ## Workspace projects
 
-Semua project tinggal di `workspace/` (satu folder per project). Tiga cara menambah:
+Semua project tinggal di `workspace/` (satu folder per project). Form cukup isi **nama**,
+lalu pilih sumber (semua opsional selain nama):
 
-1. **Dashboard → clone repo**: isi nama + link (`https://…` / `git@…`).
-2. **Dashboard → upload zip**: isi nama + file `.zip` (maks `PROJECT_MAX_MB`, default 50 MB).
-3. **Manual**: taruh folder langsung di `workspace/` — otomatis terdeteksi sebagai `manual`.
+1. **Dari prompt**: mis. "buat aplikasi pos kasir" → Althea susun PRD, eksekusi MVP,
+   lanjutkan fitur, sampai verifikasi rilis — otomatis via pipeline.
+2. **Link repo**: isi link (`https://…` / `git@…`); prompt awal opsional.
+3. **File zip**: upload `.zip` (maks `PROJECT_MAX_MB`, default 50 MB); prompt awal opsional.
+4. **Upload PRD**: file `.md`/`.txt` (maks 2 MB) → disimpan sebagai `PRD.md`,
+   langsung eksekusi MVP.
+5. **Manual**: taruh folder langsung di `workspace/` — otomatis terdeteksi sebagai `manual`.
+
+**Pipeline otonom** (`src/pipeline.ts`): PRD → MVP → fitur (berulang, maks
+`PIPELINE_FEATURE_ROUNDS`, default 3) → rilis. Tiap fase = 1 tugas; gagal di tengah
+menghentikan pipeline, batal menjeda. Pantau + jeda/lanjutkan/hentikan dari panel
+review project. Review hasil: aktivitas tugas ([hasil]/[log]), tindak lanjut per
+tugas, instruksi bebas, diff git, pohon file, dan isi file. Halaman Tasks punya
+panel [detail] per tugas: prompt, file disentuh, feed aktivitas tool/file, hasil.
+
+**MCP server** (`src/mcp.ts`): project bisa dipasangi MCP server (bawaan:
+`playwright` — otak bisa membuka, screenshot, dan mengklik app hasil generate
+untuk verifikasi). Aktifkan dari panel review project (bagian `mcp_server`);
+Althea menyuntikkan entri `althea-<id>` ke `~/.config/muse/settings.json` milik
+CLI saat tugas project itu jalan — entri lain milikmu tak pernah disentuh.
+Tiap tugas juga menampilkan **audit tool calls** (tool apa × berapa kali,
+sukses/gagal) di bawah barisnya. Server kustom bisa didaftarkan via
+`ALTHEA_MCP_SERVERS` (JSON, lihat `.env.example`); Playwright butuh
+`npm i -g @playwright/mcp` + `npx playwright install chromium` agar runnable.
+
+**Preview aplikasi** (`src/preview.ts`): panel review project punya bagian
+`preview_aplikasi` — jalankan app langsung dari dashboard dan lihat dalam
+iframe. Tiap preview dapat **port dan origin sendiri** (9111–9200,
+`PREVIEW_BASE_PORT`) sehingga path absolut, fetch, module script, dan storage
+app modern (Next/Vite) tetap jalan. Project HTML statis disajikan otomatis
+dari portnya; stack `node` default `npm run dev` (env `PORT`/`HOST`/`HOSTNAME`
+diset), `python` default `http.server`, sisanya isi command sendiri (`{port}`
+diganti otomatis, tersimpan per project). Proses dibatasi 8, log 200 baris,
+dan semua preview dimatikan saat project dihapus / server berhenti. Iframe
+di-sandbox (`allow-same-origin` sebatas origin preview itu sendiri) sehingga
+app tak bisa menyentuh dashboard; prefix proxy `/app/*` dan
+`/preview-file/*` tetap tersedia untuk kasus same-origin.
 
 Stack terdeteksi otomatis (`node`/`go`/`python`/`generic`). Saat membuat tugas,
 pilih project agar Muse bekerja di folder itu (terisolasi, tidak mengacak-acak
@@ -94,7 +132,7 @@ root Althea). Tanpa project = perilaku lama (cwd root Althea).
 1. `scp -r` proyek ke `/opt/althea` (tanpa `node_modules/`, `.env`, `dist/`, `public/*`).
 2. `npm install --omit=dev && npm run build`.
 3. `sudo cp deploy/althea.service /etc/systemd/system/ && sudo systemctl enable --now althea`.
-4. Nginx reverse-proxy `althea.domainmu.id → 127.0.0.1:3000` + TLS (certbot).
+4. Nginx reverse-proxy `althea.domainmu.id → 127.0.0.1:9999` + TLS (certbot).
 5. Isi `.env` produksi (`ADMIN_PASSWORD` kuat, token bot, admin ids).
 
 ## Struktur

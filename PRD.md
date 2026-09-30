@@ -93,6 +93,11 @@ Target runtime: Node LTS, TS strict, SQLite (lokal) → Postgres opsional di VPS
 - FR-3.5: Kill-switch: batalkan tugas aktif dari web/Telegram (matikan proses + tandai failed).
 - FR-3.6: Log output Muse mengalir live ke web (SSE) dan tersimpan per tugas; review code via git diff + pohon file + isi file per project.
 - FR-3.7: Orkestrasi LangGraph (tanpa API key; node memanggil CLI langganan): plan → implement → review dengan fix loop maks N ronde; progres persisten untuk resume.
+- FR-3.8: Context pack ketat per tugas: prompt coder hanya membawa potongan relevan (allowlist file + tree terpangkas + potongan PRD/spec), bukan seluruh repo; ada batas eksplisit "jangan ubah file di luar daftar".
+- FR-3.9: Aturan output hemat: implementasi diakhiri ringkasan singkat; dilarang menempel seluruh isi file ke output (diff dibaca sistem dari git, bukan dari output model).
+- FR-3.10: Verifier deterministik + review bertingkat: setelah implementasi, sistem menjalankan tsc/build/test dan hasilnya menjadi feedback (0 token LLM) sebelum review LLM; plan slice + gate diff sistem untuk fase rutin, review LLM penuh hanya di fase rilis.
+- FR-3.11: File konvensi project: tiap project punya STANDARDS.md (stack, struktur folder, larangan stub, DoD) yang disuntik ke prompt. Klaim soal file konvensi/ignore bawaan CLI (`.museignore`, `MUSE_CODE.md`, dsb) WAJIB diverifikasi ke `muse --help` dulu sebelum dipakai — lihat Pertanyaan Terbuka no. 5.
+- FR-3.12: Template scaffolding: project baru dimulai dari template baku (Svelte + tema Althea) agar hemat satu ronde generate-struktur-dari-nol.
 
 ### FR-4 Auto-lanjut & Kuota ±5 Jam
 - FR-4.1: Saat limit terdeteksi, run → `waiting_quota`, simpan checkpoint + estimasi reset.
@@ -180,6 +185,7 @@ Setiap milestone: demo 5 menit + catatan risiko + update KPI.
 5. **Ringan:** idle RAM < 150 MB, boot < 5 dtk pada laptop dev.
 6. **Stabilitas:** 0 kehilangan state pada uji restart 10x; crash rate < 1 per 50 run.
 7. **Kecepatan iterasi:** satu fitur kecil (satu adapter/step baru) selesai < 1 hari kerja.
+8. **Hemat token:** rata-rata estimasi token per tugas fase fitur turun vs baseline single-shot (diukur dari tracking usage per tugas yang sudah ada).
 
 ## 12. Risiko & Mitigasi (ringkas)
 
@@ -188,6 +194,7 @@ Setiap milestone: demo 5 menit + catatan risiko + update KPI.
 - Telegram tidak stabil → web tetap bisa approve; antrean retry notifikasi.
 - Subproses nyangkut → timeout + kill + checkpoint per step.
 - Secrets bocor di log → redaction + file 600 + panduan env.
+- Paralelisme subagent di kuota langganan membakar kuota N× lebih cepat → default eksekusi sekuensial (LIFO); paralel hanya untuk tugas kecil yang independen.
 
 ## 13. Pertanyaan Terbuka
 
@@ -195,6 +202,7 @@ Setiap milestone: demo 5 menit + catatan risiko + update KPI.
 2. Domain VPS sudah ada? Butuh TLS otomatis (Caddy/Nginx)?
 3. Batas konkurensi run default (1 atau 2) agar laptop tetap ringan?
 4. Perlu mode offline penuh (tanpa Telegram) di MVP?
+5. File konvensi/ignore apa yang benar-benar dibaca Muse CLI (`.museignore`? `MUSE_CODE.md`? `settings.json`)? Verifikasi via `muse --help` sebelum FR-3.11 mengandalkan salah satunya.
 
 ---
 *File ini adalah sumber kebenaran MVP. Perubahan scope setelah M1 harus dicatat di sini + alasan.*

@@ -2,8 +2,8 @@
 // Jalankan: npm test (tsx + node:test, tanpa dependensi baru).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { defaultState, appendLog } from "../src/state.js";
-import { pushTask, peek, markDone, requestApproval, resolveApproval, cancelTask, stackSummary } from "../src/workflow.js";
+import { defaultState, appendLog, appendActivity } from "../src/state.js";
+import { pushTask, peek, markDone, requestApproval, resolveApproval, cancelTask, noteTimeout, stackSummary } from "../src/workflow.js";
 import { killRunning } from "../src/claude.js";
 import { detectLimit, parseRetryAfter, enterLimitCooldown, limitDue } from "../src/claude.js";
 import { goSleep, forceWake, isSleeping } from "../src/sleeper.js";
@@ -75,7 +75,7 @@ describe("workflow stack LIFO + approval", () => {
     assert.equal(resolveApproval(defaultState(), "t_takada", true), false);
   });
   it("stackSummary ramah saat kosong", () => {
-    assert.match(stackSummary(defaultState()), /kosong/);
+    assert.match(stackSummary(defaultState()), /empty/);
   });
 });
 
@@ -97,6 +97,43 @@ describe("cancelTask (kill-switch)", () => {
   });
   it("killRunning tanpa proses → false", () => {
     assert.equal(killRunning(), false);
+  });
+});
+
+describe("noteTimeout (retry otomatis)", () => {
+  it("attempts < maks → queued lagi", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    t.status = "running";
+    t.attempts = 1;
+    assert.equal(noteTimeout(s, t.id, 3), "retry");
+    assert.equal(s.stack[0].status, "queued");
+  });
+  it("attempts capai maks → failed + saran naikkan timeout", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    t.status = "running";
+    t.attempts = 3;
+    assert.equal(noteTimeout(s, t.id, 3), "fail");
+    assert.equal(s.stack[0].status, "failed");
+    assert.match(s.stack[0].note || "", /CLAUDE_TIMEOUT_SECONDS/);
+  });
+  it("id tak dikenal → fail", () => {
+    assert.equal(noteTimeout(defaultState(), "t_takada", 3), "fail");
+  });
+});
+
+describe("appendActivity", () => {
+  it("simpan + pangkas 120 entri & 5 tugas", () => {
+    const s = defaultState();
+    appendActivity(s, "a", "tool", "bash …");
+    assert.equal(s.activity.a.length, 1);
+    assert.match(s.activity.a[0].t, /^\d\d:\d\d:\d\d$/);
+    for (let i = 0; i < 130; i++) appendActivity(s, "a", "file", `ubah: f${i}`);
+    assert.equal(s.activity.a.length, 120);
+    for (const id of ["b", "c", "d", "e", "f"]) appendActivity(s, id, "tool", "x");
+    assert.equal(Object.keys(s.activity).length, 5);
+    assert.ok(!s.activity.a);
   });
 });
 
