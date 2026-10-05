@@ -54,6 +54,14 @@ describe("exec stream", () => {
     assert.deepEqual(r.log, ["muse: workspace root: /x (cwd default)"]);
     assert.match(s.transcript(), /workspace root/);
   });
+  it("errors(): pesan CLI non-JSON terkumpul, jawaban AI tidak", () => {
+    const s = createExecStream();
+    s.push(ev("run.output.delta", { text: "I refactored the quota logic" }));
+    s.push(ev("run.terminal.completed", { text: "All done — quota config updated" }));
+    assert.equal(s.errors(), ""); // ← jawaban AI bukan sinyal limit
+    s.push("muse: usage limit reached, try again in 5 minutes");
+    assert.match(s.errors(), /usage limit reached/);
+  });
   it("status model → log; reminder + noise diabaikan", () => {
     const s = createExecStream();
     const m = s.push(ev("task.lifecycle.status", {
@@ -76,6 +84,13 @@ describe("exec stream", () => {
     }));
     assert.deepEqual(r.activities, [{ kind: "note", text: "failed: boom" }]);
     assert.deepEqual(r.log, ["[!] boom"]);
+  });
+  it("errors(): lifecycle.failed masuk buffer error", () => {
+    const s = createExecStream();
+    s.push(ev("task.lifecycle.failed", {
+      event: { kind: "failed", reason: "quota exhausted for this period" },
+    }));
+    assert.match(s.errors(), /quota exhausted/);
   });
 });
 
@@ -123,6 +138,13 @@ describe("exec stream opencode", () => {
     const r = s.push(oc("error", {}, { error: { message: "quota exceeded" } }));
     assert.deepEqual(r.activities, [{ kind: "note", text: "error: quota exceeded" }]);
     assert.deepEqual(r.log, ["[!] quota exceeded"]);
+  });
+  it("errors(): event error opencode terkumpul, text part tidak", () => {
+    const s = createExecStream();
+    s.push(oc("text", { type: "text", text: "Fixed the rate limiter" }));
+    assert.equal(s.errors(), "");
+    s.push(oc("error", {}, { error: { message: "rate limit exceeded" } }));
+    assert.match(s.errors(), /rate limit exceeded/);
   });
   it("step_start/step_finish/message/done = noise", () => {
     const s = createExecStream();

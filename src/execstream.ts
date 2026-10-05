@@ -29,12 +29,19 @@ export interface StreamPush {
 export interface ExecStream {
   push(line: string): StreamPush;
   transcript(): string;
+  /** Teks error ASLI dari CLI/API: baris non-JSON (stdout/stderr CLI),
+   *  event error opencode, task.lifecycle.failed muse. Sumber deteksi
+   *  limit kuota — jawaban AI (text delta/terminal) TAK pernah masuk
+   *  sini, sehingga menyebut "quota" saat kerja normal tak memicu
+   *  cooldown. */
+  errors(): string;
 }
 
 export function createExecStream(): ExecStream {
   const seenTasks = new Set<string>();
   const seenTools = new Set<string>();
   const chunks: string[] = [];
+  const errs: string[] = [];
   let terminal: string | null = null;
   const empty = (): StreamPush => ({ log: [], activities: [], text: "" });
 
@@ -52,6 +59,9 @@ export function createExecStream(): ExecStream {
         r.log.push(line);
         r.text = line + "\n";
         chunks.push(line + "\n");
+        // Bukan JSON → pesan level CLI (mis. "muse: usage limit
+        // reached"), bukan jawaban AI → masuk buffer error.
+        errs.push(line);
         return r;
       }
       const pt = String(o.payload_type || "");
@@ -87,6 +97,7 @@ export function createExecStream(): ExecStream {
         if (oc === "error") {
           const e = o.error;
           const msg = (typeof e === "string" ? e : String((e as { message?: unknown } | null)?.message || o.message || "error")).slice(0, 200);
+          errs.push(msg);
           r.activities.push({ kind: "note", text: `error: ${msg}` });
           r.log.push(`[!] ${msg}`);
           return r;
@@ -132,6 +143,7 @@ export function createExecStream(): ExecStream {
       if (pt === "task.lifecycle.failed") {
         const reason = String(ev.reason || "failed").slice(0, 200);
         if (/reminder/i.test(reason)) return r;
+        errs.push(reason);
         r.activities.push({ kind: "note", text: `failed: ${reason}` });
         r.log.push(`[!] ${reason}`);
         return r;
@@ -140,6 +152,9 @@ export function createExecStream(): ExecStream {
     },
     transcript(): string {
       return terminal ?? chunks.join("");
+    },
+    errors(): string {
+      return errs.join("\n").slice(0, 4000);
     },
   };
 }

@@ -303,6 +303,20 @@ export function detectLimit(text: string): boolean {
   return LIMIT_PATTERNS.some((re) => re.test(text));
 }
 
+/**
+ * true = run gagal karena LIMIT KUOTA provider (FR-4).
+ * Sinyal sah = error ASLI dari CLI/API (baris non-JSON stdout/stderr,
+ * event error opencode, task.lifecycle.failed muse) — selalu diperiksa.
+ * Jawaban AI (transkrip) hanya diperiksa bila run gagal (exit ≠ 0):
+ * prosa normal yang menyebut "quota"/"limit" saat bekerja BUKAN limit,
+ * sehingga tak memicu cooldown. Admin tinggal ganti model/provider lain
+ * yang belum kena limit, lalu resume.
+ */
+export function limitHit(exitCode: number | null, errorText: string, transcript: string): boolean {
+  if (detectLimit(errorText)) return true;
+  return exitCode !== 0 && detectLimit(transcript);
+}
+
 /** Coba baca "try again in N ..." → ms. Dukung detik/menit/jam. */
 export function parseRetryAfter(text: string): number | null {
   const m = text.match(/try again in\s+(\d+)\s*(second|minute|hour|detik|menit|jam)/i);
@@ -403,16 +417,17 @@ export function runClaude(
         return;
       }
       const transcript = stream.transcript().slice(0, 8000);
+      const errorText = stream.errors();
       if (timedOut) {
         finish({ ok: false, output: `TIMEOUT ${timeoutSecs}s — process killed. Partial output:\n${transcript}`, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: true });
         return;
       }
-      const hitLimit = detectLimit(transcript);
+      const hitLimit = limitHit(code, errorText, transcript);
       finish({
         ok: code === 0 && !hitLimit,
         output: transcript || `(exit ${code})`,
         hitLimit,
-        retryAfterMs: hitLimit ? parseRetryAfter(transcript) : null,
+        retryAfterMs: hitLimit ? parseRetryAfter(`${errorText}\n${transcript}`) : null,
         cancelled: false,
         timedOut: false,
       });

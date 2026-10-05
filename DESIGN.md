@@ -109,7 +109,7 @@ File ini adalah satu-satunya database di MVP (cukup untuk solo builder; SQLite/P
 
 ## 6. Strategi limit ±5 jam
 
-- Deteksi: pola `usage limit / rate limit / quota / 429 / overloaded / try again in / reset at|in / limit reached` (case-insensitive) pada gabungan stdout+stderr.
+- Deteksi: pola `usage limit / rate limit / quota / 429 / overloaded / try again in / reset at|in / limit reached` (case-insensitive) pada **teks error asli CLI/API** (baris non-JSON stdout/stderr, event `error` opencode, `task.lifecycle.failed` muse). Jawaban AI hanya diperiksa bila exit ≠ 0 — sebutan "quota" dalam prose normal bukan limit.
 - Tunggu eksplisit: `try again in N detik|menit|jam` → cooldown tepat N. Tanpa itu → +5 jam (konfigurasi `CLAUDE_RESET_HOURS`).
 - Resume: otomatis di tick berikutnya setelah cooldown lewat — prompt diambil dari state, bukan dari ketikan ulang.
 - Risiko: format pesan limit berubah → ada pola ganda + fallback keyword; probe manual via `/bangun`.

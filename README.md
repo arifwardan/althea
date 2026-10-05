@@ -32,7 +32,9 @@ Dashboard memakai **Svelte 5 + Vite** (build statis ±100 KB, tanpa framework ru
 3. **Resume tiap reset ±5 jam tanpa prompt ulang** — `src/claude.ts` + `src/state.ts`.
    Prompt tersimpan di `data/state.json`; limit → `queued` + cooldown → lanjut sendiri.
 4. **Deteksi limit token** — pola `usage limit / rate limit / quota / 429 / overloaded /
-   try again in …` → notif Telegram + cooldown (`retryAfter` bila ada, else +5 jam).
+   try again in …` pada **error asli CLI/API** (bukan jawaban AI) → notif Telegram +
+   cooldown (`retryAfter` bila ada, else +5 jam). Provider/model lain yang belum
+   limit tetap bisa dipakai: ganti model di dashboard lalu `/wake`.
 5. **Kill-switch** — tombol [hentikan] di dashboard / `/batal <id>` di Telegram
    mematikan proses Muse detik itu juga (SIGTERM → SIGKILL).
 6. **Log live + review code** — output Muse mengalir ke dashboard (SSE, tersimpan

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { defaultState, appendLog, appendActivity } from "../src/state.js";
 import { pushTask, peek, markDone, requestApproval, resolveApproval, cancelTask, noteTimeout, stackSummary } from "../src/workflow.js";
 import { killRunning } from "../src/claude.js";
-import { detectLimit, parseRetryAfter, enterLimitCooldown, limitDue } from "../src/claude.js";
+import { detectLimit, parseRetryAfter, enterLimitCooldown, limitDue, limitHit } from "../src/claude.js";
 import { goSleep, forceWake, isSleeping } from "../src/sleeper.js";
 
 describe("deteksi limit token", () => {
@@ -23,6 +23,18 @@ describe("deteksi limit token", () => {
   it("tidak false-positive pada output normal", () => {
     assert.equal(detectLimit("done: 3 files changed, tests passed"), false);
     assert.equal(detectLimit("IZIN: boleh deploy ke staging?"), false);
+  });
+  it("limitHit: hanya error asli atau run gagal + pesan limit", () => {
+    // Error asli CLI/API → limit, walau exit 0 (CLI melaporkan error sendiri).
+    assert.equal(limitHit(0, "usage limit reached, try again in 5 minutes", ""), true);
+    assert.equal(limitHit(1, "quota exceeded for this period", ""), true);
+    // Run SUKSES (exit 0) tapi jawaban AI menyebut quota → BUKAN limit
+    // (false-positive lama: cooldown 5 jam padahal AI cuma bahas quota).
+    assert.equal(limitHit(0, "", "I updated the quota config; tests passed"), false);
+    // Run gagal + pesan limit di output → limit.
+    assert.equal(limitHit(1, "", "Error: 429 Too Many Requests"), true);
+    // Run gagal tanpa pesan limit → gagal biasa, bukan cooldown.
+    assert.equal(limitHit(1, "", "done: 3 files changed"), false);
   });
   it("parseRetryAfter membaca 'try again in N unit'", () => {
     assert.equal(parseRetryAfter("try again in 5 minutes"), 5 * 60_000);
