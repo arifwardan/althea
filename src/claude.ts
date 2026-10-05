@@ -1,6 +1,6 @@
 // Pembungkus Muse CLI: eksekusi prompt, DETEKSI LIMIT TOKEN,
 // dan jadwalkan RESUME OTOMATIS tiap reset ±5 jam tanpa prompt ulang.
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { config, resetMs } from "./config.js";
 import type { AltheaState } from "./state.js";
 import { logEvent } from "./state.js";
@@ -181,6 +181,101 @@ export function spawnErrorNote(bin: string, err: unknown): string {
     return `brain not found: "${bin}" (ENOENT) — check BRAIN_BIN in .env then restart the server`;
   }
   return `spawn error: ${String(err)}`;
+}
+
+// ——— Katalog model untuk select dashboard ———
+// muse: daftar terkurasi (resolve-nya terverifikasi via `muse model-profile show`).
+// opencode: provider terautentikasi (`opencode auth list --format json`) ×
+// model (`opencode models`) yang berawalan provider tersebut.
+export interface BrainProvider { id: string; name: string; }
+export interface BrainModelOption { value: string; label: string; provider: string; }
+export interface BrainCatalog { providers: BrainProvider[]; models: BrainModelOption[]; }
+
+/** Model muse yang terbukti resolve (model-profile show exit 0). */
+export const MUSE_MODELS = ["muse-spark", "muse-spark-1.3"];
+
+export type CatalogRun = (bin: string, args: string[], timeoutMs: number) => string | null;
+
+function defaultCatalogRun(bin: string, args: string[], timeoutMs: number): string | null {
+  try {
+    const out = execFileSync(bin, args, {
+      encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 4 * 1024 * 1024,
+    });
+    return typeof out === "string" ? out : String(out);
+  } catch {
+    return null;
+  }
+}
+
+/** Provider opencode yang punya koneksi tersimpan (dari JSON `auth list`). */
+export function parseOpenCodeProviders(raw: string | null): BrainProvider[] {
+  if (!raw) return [];
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (!Array.isArray(v)) return [];
+    const out: BrainProvider[] = [];
+    for (const p of v as Array<Record<string, unknown>>) {
+      if (typeof p?.id === "string" && p.id && typeof p?.name === "string" &&
+        Array.isArray(p?.connections) && (p.connections as unknown[]).length > 0) {
+        out.push({ id: p.id as string, name: p.name as string });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Saring baris `opencode models` ke provider terdaftar ("provider/model", unik, terurut). */
+export function parseOpenCodeModels(raw: string | null, providerIds: Set<string> | string[]): BrainModelOption[] {
+  const set = providerIds instanceof Set ? providerIds : new Set(providerIds);
+  if (!raw) return [];
+  const out: BrainModelOption[] = [];
+  const seen = new Set<string>();
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t || !t.includes("/")) continue;
+    const i = t.indexOf("/");
+    const provider = t.slice(0, i);
+    const model = t.slice(i + 1);
+    if (!set.has(provider) || !model || seen.has(t)) continue;
+    seen.add(t);
+    out.push({ value: t, label: model, provider });
+  }
+  return out.sort((a, b) => a.provider.localeCompare(b.provider) || a.label.localeCompare(b.label));
+}
+
+export interface CatalogOpts { agent?: string; bin?: string; run?: CatalogRun; useCache?: boolean; }
+
+const CATALOG_TTL_MS = 5 * 60_000;
+let catalogCache: { key: string; at: number; cat: BrainCatalog } | null = null;
+
+/** Kosongkan cache katalog (untuk test). */
+export function clearBrainCatalogCache(): void {
+  catalogCache = null;
+}
+
+/** Katalog select dashboard sesuai agen aktif. Gagal baca CLI → katalog kosong (UI fallback). */
+export function listBrainModels(opts: CatalogOpts = {}): BrainCatalog {
+  const b = effectiveBrain();
+  const agent = opts.agent || b.agent;
+  const bin = opts.bin || b.bin;
+  if (agent !== "opencode") {
+    return {
+      providers: [],
+      models: MUSE_MODELS.map((m) => ({ value: m, label: m, provider: "muse" })),
+    };
+  }
+  if (opts.useCache !== false && catalogCache && catalogCache.key === bin &&
+    Date.now() - catalogCache.at < CATALOG_TTL_MS) {
+    return catalogCache.cat;
+  }
+  const run = opts.run || defaultCatalogRun;
+  const providers = parseOpenCodeProviders(run(bin, ["auth", "list", "--format", "json"], 15_000));
+  const models = parseOpenCodeModels(run(bin, ["models"], 20_000), providers.map((p) => p.id));
+  const cat = { providers, models };
+  if (opts.useCache !== false) catalogCache = { key: bin, at: Date.now(), cat };
+  return cat;
 }
 
 /** Ringkasan satu baris untuk log boot. */

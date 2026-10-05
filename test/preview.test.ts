@@ -23,7 +23,7 @@ import {
   resolvePreviewPath, isStaticDir, createPreviewManager, previewUrlFor,
   tabUrlFor, portCandidates, pickPort,
   isMonorepo, previewNote, isStandardStack, previewKind, siteDomain, siteUrl,
-  linkSite, lerdAvailable,
+  linkSite, lerdAvailable, DEFAULT_PREVIEW_BASE_PORT,
 } from "../src/preview.js";
 
 const tmp = (files = {}) => {
@@ -134,6 +134,9 @@ describe("portCandidates", () => {
 });
 
 describe("port", () => {
+  it("port awal preview 9001 (tepat setelah Althea :9000)", () => {
+    assert.equal(DEFAULT_PREVIEW_BASE_PORT, 9001);
+  });
   it("claimPort di rentang & berbeda tiap klaim", async () => {
     const used = new Set();
     const a = await claimPort(9111, used);

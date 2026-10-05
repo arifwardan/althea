@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import {
   BRAIN_EFFORTS, normalizeEffort, normalizeModel,
   effectiveBrain, brainArgs, setBrainOverride, spawnErrorNote,
+  MUSE_MODELS, parseOpenCodeProviders, parseOpenCodeModels,
+  listBrainModels, clearBrainCatalogCache,
 } from "../src/claude.js";
 import { loadState } from "../src/state.js";
 import { detectBrainAgent } from "../src/config.js";
@@ -132,5 +134,67 @@ describe("migrasi state lama", () => {
     writeFileSync(p, JSON.stringify({ version: 1, stack: [] }));
     const s = loadState(p);
     assert.deepEqual(s.brain, { model: "", effort: "" });
+  });
+});
+
+describe("katalog model dashboard", () => {
+  it("muse: daftar terkurasi tanpa subprocess", () => {
+    let calls = 0;
+    const cat = listBrainModels({
+      agent: "muse", bin: "muse",
+      run: () => { calls++; return null; }, useCache: false,
+    });
+    assert.equal(calls, 0);
+    assert.deepEqual(cat.providers, []);
+    assert.deepEqual(cat.models.map((m) => m.value), [...MUSE_MODELS]);
+    assert.ok(MUSE_MODELS.length > 0);
+  });
+  it("parseOpenCodeProviders: hanya yang punya koneksi", () => {
+    const raw = JSON.stringify([
+      { id: "kilo", name: "Kilo Gateway", connections: [{ type: "credential" }] },
+      { id: "kosong", name: "Empty", connections: [] },
+      { id: "rusak", name: "Broken" },
+    ]);
+    assert.deepEqual(parseOpenCodeProviders(raw), [{ id: "kilo", name: "Kilo Gateway" }]);
+    assert.deepEqual(parseOpenCodeProviders("bukan json"), []);
+    assert.deepEqual(parseOpenCodeProviders(null), []);
+  });
+  it("parseOpenCodeModels: saring provider, unik, terurut", () => {
+    const raw = "kilo/b\nopenrouter/y\nlain/z\n\nkilo/b\nkilo/a\ntanpa-slash\n";
+    assert.deepEqual(parseOpenCodeModels(raw, ["kilo"]), [
+      { value: "kilo/a", label: "a", provider: "kilo" },
+      { value: "kilo/b", label: "b", provider: "kilo" },
+    ]);
+    assert.deepEqual(parseOpenCodeModels(null, ["kilo"]), []);
+  });
+  it("listBrainModels opencode: gabungan + cache sekali panggil", () => {
+    clearBrainCatalogCache();
+    let calls = 0;
+    const run = (_bin: string, args: string[], _t: number): string | null => {
+      calls++;
+      if (args[0] === "auth") {
+        return JSON.stringify([{ id: "kilo", name: "Kilo", connections: [{}] }]);
+      }
+      return "kilo/b\nopenrouter/y\n";
+    };
+    try {
+      const a = listBrainModels({ agent: "opencode", bin: "opencode", run });
+      assert.deepEqual(a.providers, [{ id: "kilo", name: "Kilo" }]);
+      assert.deepEqual(a.models.map((m) => m.value), ["kilo/b"]);
+      const b = listBrainModels({ agent: "opencode", bin: "opencode", run });
+      assert.deepEqual(b, a);
+      assert.equal(calls, 2); // auth + models sekali; panggilan kedua dari cache
+    } finally {
+      clearBrainCatalogCache();
+    }
+  });
+  it("CLI gagal → katalog kosong (UI fallback, tak meledak)", () => {
+    clearBrainCatalogCache();
+    try {
+      const cat = listBrainModels({ agent: "opencode", bin: "opencode", run: () => null });
+      assert.deepEqual(cat, { providers: [], models: [] });
+    } finally {
+      clearBrainCatalogCache();
+    }
   });
 });

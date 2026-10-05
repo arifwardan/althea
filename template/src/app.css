@@ -1,0 +1,27 @@
+@layer base {
+  :root {
+    --bg: #050805;
+    --panel: #0a0f0b;
+    --ink: #020403;
+    --line: #1e2e24;
+    --txt: #dcebe3;
+    --dim: #8ba398;
+    --grn: #2fe69b;
+    --grn-hi: #6bffb4;
+    --grn-deep: #147a4f;
+    --grn-ink: #02120a;
+    --amb: #f5a524;
+    --red: #f2555a;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--txt);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
+  }
+  ::selection { background: var(--grn); color: var(--grn-ink); }
+}

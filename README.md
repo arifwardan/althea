@@ -102,7 +102,7 @@ sukses/gagal) di bawah barisnya. Server kustom bisa didaftarkan via
 
 **Preview aplikasi** (`src/preview.ts`): panel review project punya bagian
 `preview_aplikasi` — jalankan app langsung dari dashboard dan lihat dalam
-iframe. Tiap preview dapat **port dan origin sendiri** (9111–9200,
+iframe. Tiap preview dapat **port dan origin sendiri** (9001–9090,
 `PREVIEW_BASE_PORT`) sehingga path absolut, fetch, module script, dan storage
 app modern (Next/Vite) tetap jalan. Project HTML statis disajikan otomatis
 dari portnya; stack `node` default `npm run dev` (env `PORT`/`HOST`/`HOSTNAME`

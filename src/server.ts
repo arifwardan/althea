@@ -8,7 +8,7 @@ import type { AltheaState } from "./state.js";
 import { config } from "./config.js";
 import { pushTask, pushFollowup, resolveApproval, cancelTask } from "./workflow.js";
 import {
-  killRunning, setBrainOverride, effectiveBrain,
+  killRunning, setBrainOverride, effectiveBrain, listBrainModels,
   normalizeEffort, normalizeModel, BRAIN_EFFORTS,
   setTimeoutOverride, effectiveTimeoutSeconds, parseTimeoutSeconds,
   TIMEOUT_MIN_SECONDS, TIMEOUT_MAX_SECONDS, TIMEOUT_DEFAULT_SECONDS,
@@ -316,7 +316,7 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         return json(res, await getMetrics());
       }
       if (req.method === "GET" && path === "/api/brain") {
-        return json(res, { ...effectiveBrain(), efforts: BRAIN_EFFORTS });
+        return json(res, { ...effectiveBrain(), efforts: BRAIN_EFFORTS, catalog: listBrainModels() });
       }
       if (req.method === "PUT" && path === "/api/brain") {
         const { model, effort } = JSON.parse((await body(req)) || "{}");

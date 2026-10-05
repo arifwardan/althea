@@ -20,6 +20,34 @@
   let brain = $state(null);
   let brainModel = $state("");
   let brainEffort = $state("");
+  let brainProvider = $state("");
+
+  // Opsi select model: dari katalog backend per agen (opencode = provider/model
+  // terautentikasi, muse = daftar terkurasi). Nilai tersimpan yang tak ada di
+  // katalog tetap dipertahankan sebagai opsi agar tak hilang.
+  let providerOptions = $derived([
+    { value: "", label: "all providers" },
+    ...((brain?.catalog?.providers || []).map((p) => ({ value: p.id, label: p.name }))),
+  ]);
+  let filteredModels = $derived(
+    (brain?.catalog?.models || []).filter((m) => !brainProvider || m.provider === brainProvider),
+  );
+  let modelOptions = $derived([
+    { value: "", label: "— CLI default —" },
+    ...filteredModels.map((m) => ({
+      value: m.value,
+      label: brain?.agent === "opencode" && !brainProvider ? `${m.label} · ${m.provider}` : m.label,
+    })),
+    ...(!brainModel || filteredModels.some((m) => m.value === brainModel)
+      ? []
+      : [{ value: brainModel, label: `${brainModel} (saved)` }]),
+  ]);
+
+  // Ganti provider → model yang bukan miliknya ikut tereset.
+  $effect(() => {
+    const p = brainProvider;
+    if (p && brainModel && !brainModel.startsWith(p + "/")) brainModel = "";
+  });
   let brainMsg = $state("");
   let limits = $state(null);
   let timeoutInput = $state("");
@@ -179,11 +207,17 @@
     }
   }
 
+  function syncProviderFromModel() {
+    brainProvider =
+      brain?.agent === "opencode" && brainModel.includes("/") ? brainModel.split("/")[0] : "";
+  }
+
   async function loadBrain() {
     try {
       brain = await (await api("/api/brain")).json();
       brainModel = brain.model || "";
       brainEffort = brain.effort || "";
+      syncProviderFromModel();
     } catch {
       /* authed=false ditangani api() */
     }
@@ -237,6 +271,7 @@
       brain = j.brain;
       brainModel = brain.model || "";
       brainEffort = brain.effort || "";
+      syncProviderFromModel();
       brainMsg = "✓ saved — applies to next spawn";
     } catch {
       brainMsg = "✕ save failed";
@@ -1648,10 +1683,28 @@
             <div class="border-b border-border pb-4">
               <div class="mb-2 text-xs font-medium">model_control</div>
               <div class="mb-3 truncate text-xs text-muted-foreground">{brain ? `${brain.agent === "opencode" ? "opencode · " : ""}${brain.bin}${brain.subcommand ? " " + brain.subcommand : " -p"}` : "…"} · {brain?.model || "default CLI"} ({brain?.modelSource || "…"}) · {brain?.effort || "default CLI"} ({brain?.effortSource || "…"})</div>
-              <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                {#if (brain?.catalog?.providers || []).length}
+                  <div>
+                    <label for="bprov" class="mb-1 block text-xs font-medium">provider</label>
+                    <Select
+                      bind:value={brainProvider}
+                      label="provider"
+                      placeholder="all providers"
+                      options={providerOptions}
+                    />
+                  </div>
+                {/if}
                 <div>
                   <label for="bmodel" class="mb-1 block text-xs font-medium">model</label>
-                  <Input id="bmodel" type="text" bind:value={brainModel} placeholder="empty = CLI default" autocomplete="off" />
+                  <Select
+                    bind:value={brainModel}
+                    label="model"
+                    placeholder="— CLI default —"
+                    options={modelOptions}
+                    searchable
+                    searchPlaceholder="search model…"
+                  />
                 </div>
                 <div>
                   <label for="beff" class="mb-1 block text-xs font-medium">reasoning effort</label>

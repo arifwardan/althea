@@ -1,5 +1,6 @@
 // Konfigurasi dari env. Sengaja tanpa lib dotenv: parse file .env manual agar nol dependensi.
 import { readFileSync, existsSync } from "node:fs";
+import { DEFAULT_PREVIEW_BASE_PORT } from "./preview.js";
 
 function loadDotEnv(path = ".env"): void {
   if (!existsSync(path)) return;
@@ -81,7 +82,7 @@ export const config = {
   sessionDays: num("SESSION_DAYS", 7) || 7,
   // Workspace: rumah semua project (tambah via link repo / upload zip).
   workspaceDir: process.env.WORKSPACE_DIR || "./workspace",
-  previewBasePort: num("PREVIEW_BASE_PORT", 9111), // alokasi port preview 9111–9200
+  previewBasePort: num("PREVIEW_BASE_PORT", DEFAULT_PREVIEW_BASE_PORT), // alokasi port preview 9001–9090
   // Port yang di-proxy Caddy ke *.test (FR-TOOL-07): server dev project
   // yang mendengarkan port ini dibuka sebagai https://namaproject.test.
   previewTestPort: num("PREVIEW_TEST_PORT", 5173),

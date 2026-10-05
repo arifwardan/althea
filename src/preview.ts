@@ -1,4 +1,4 @@
-// Preview aplikasi project: jalankan server dev di port terkelola (9111+),
+// Preview aplikasi project: jalankan server dev di port terkelola (9001+),
 // atau sajikan file statis bila project berupa HTML polos.
 // Dashboard menampilkan via iframe same-origin (/app/* proxy, /preview-file/* statis).
 // Server dev ber-port tetap (mis. vite --port 5173) dideteksi otomatis lewat
@@ -388,7 +388,7 @@ interface Rec {
   child: ChildProcess | null; // mode server
   http: HttpServer | null; // mode static: penyaji file dalam proses
   port: number | null; // port yang didengarkan app (ditemukan/dikelola)
-  managedPort: number | null; // port alokasi 9111+ (command {port}/PORT)
+  managedPort: number | null; // port alokasi 9001+ (command {port}/PORT)
   cmd: string | null;
   dir: string;
   mode: "static" | "server";
@@ -398,6 +398,9 @@ interface Rec {
   error: string | null;
   logs: string[];
 }
+
+/** Port awal alokasi preview (satu port per preview yang jalan, 9001–9090). */
+export const DEFAULT_PREVIEW_BASE_PORT = 9001;
 
 export interface PreviewManagerOpts {
   basePort?: number;
@@ -436,7 +439,7 @@ export function tabUrlFor(name: string, mode: "static" | "server", port: number 
 }
 
 export function createPreviewManager(opts: PreviewManagerOpts = {}) {
-  const basePort = opts.basePort || 9111;
+  const basePort = opts.basePort || DEFAULT_PREVIEW_BASE_PORT;
   const maxProcs = opts.maxProcs || 8;
   const readyTimeoutMs = opts.readyTimeoutMs || 12_000;
   const testPort = opts.testPort ?? null;
@@ -508,7 +511,7 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     }
     const port = await claimPort(basePort, usedPorts);
     if (port === null) {
-      return { ...stopped(), state: "failed", error: "preview ports 9111–9200 are full" };
+      return { ...stopped(), state: "failed", error: `preview ports ${basePort}–${basePort + 89} are full` };
     }
     usedPorts.add(port);
     const finalCmd = cmd.split("{port}").join(String(port));
@@ -649,7 +652,7 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     }
     const port = await claimPort(basePort, usedPorts);
     if (port === null) {
-      return { ...stopped(), state: "failed", error: "preview ports 9111–9200 are full" };
+      return { ...stopped(), state: "failed", error: `preview ports ${basePort}–${basePort + 89} are full` };
     }
     const rec: Rec = {
       child: null, http: null, port, managedPort: port, cmd: null, dir, mode: "static",
