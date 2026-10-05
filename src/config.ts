@@ -24,6 +24,30 @@ function num(name: string, dflt: number): number {
   return Number.isFinite(v) && v >= 0 ? v : dflt;
 }
 
+// Otak: agen coding — "muse" (Muse Code) atau "opencode" (OpenCode).
+// Ditebak otomatis dari BRAIN_BIN kecuali BRAIN_AGENT diisi eksplisit.
+const rawBrainBin = process.env.BRAIN_BIN || process.env.CLAUDE_BIN || "muse";
+
+/** Agen coding dari nama biner / env eksplisit. "muse" | "opencode". */
+export function detectBrainAgent(bin: string, explicit?: string): string {
+  const e = (explicit || "").trim().toLowerCase();
+  if (e === "opencode" || e === "muse") return e;
+  return /opencode/i.test(bin) ? "opencode" : "muse";
+}
+
+const brainAgent = detectBrainAgent(rawBrainBin, process.env.BRAIN_AGENT);
+
+/**
+ * Subcommand per agen. "exec" adalah default khusus muse — bila .env
+ * memakainya dan agen berganti ke opencode, jangan ikut (opencode
+ * tidak punya «exec»; subcommand-nya «run»).
+ */
+const resolveBrainSubcommand = (agent: string): string => {
+  const sub = process.env.BRAIN_SUBCOMMAND;
+  if (agent === "opencode") return sub && sub !== "exec" ? sub : "run";
+  return sub ?? "exec";
+};
+
 export const config = {
   port: num("PORT", 9999),
   host: process.env.HOST || "127.0.0.1",
@@ -35,9 +59,11 @@ export const config = {
     .filter(Boolean),
   telegramPollSeconds: num("TELEGRAM_POLL_SECONDS", 5),
   claudeBin: process.env.CLAUDE_BIN || "Muse",
-  // Otak: `muse exec` (+ --model/--reasoning-effort). BRAIN_SUBCOMMAND="" = gaya lama `Muse -p`.
-  brainBin: process.env.BRAIN_BIN || process.env.CLAUDE_BIN || "muse",
-  brainSubcommand: process.env.BRAIN_SUBCOMMAND ?? "exec",
+  // Otak: agen coding (muse = Muse Code, opencode = OpenCode).
+  // `muse exec` / `opencode run` (+ flags per agen). BRAIN_SUBCOMMAND="" = gaya lama `Muse -p`.
+  brainBin: rawBrainBin,
+  brainAgent,
+  brainSubcommand: resolveBrainSubcommand(brainAgent),
   brainModel: (process.env.BRAIN_MODEL || "").trim(),
   brainEffort: (process.env.BRAIN_EFFORT || "").trim().toLowerCase(),
   claudeResetHours: num("CLAUDE_RESET_HOURS", 5) || 5,
@@ -56,9 +82,15 @@ export const config = {
   // Workspace: rumah semua project (tambah via link repo / upload zip).
   workspaceDir: process.env.WORKSPACE_DIR || "./workspace",
   previewBasePort: num("PREVIEW_BASE_PORT", 9111), // alokasi port preview 9111–9200
+  // Port yang di-proxy Caddy ke *.test (FR-TOOL-07): server dev project
+  // yang mendengarkan port ini dibuka sebagai https://namaproject.test.
+  previewTestPort: num("PREVIEW_TEST_PORT", 5173),
   projectMaxMb: num("PROJECT_MAX_MB", 50) || 50,
   gitBin: process.env.GIT_BIN || "git",
   gitTimeoutSeconds: num("GIT_TIMEOUT_SECONDS", 180) || 180,
+  // Remote GitHub otomatis saat create project: git@github.com:USER/name.git.
+  // Kosong = lewati (remote bawaan hasil clone tak pernah ditimpa).
+  githubUsername: (process.env.GITHUB_USERNAME || "").trim(),
   // Verifier deterministik (FR-3.10): skrip npm project setelah implementasi.
   verifyEnabled: process.env.VERIFY_ENABLED !== "0",
   verifyScripts: (process.env.VERIFY_SCRIPTS || "check,test,build").split(",").map((s) => s.trim()).filter(Boolean),

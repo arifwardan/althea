@@ -10,8 +10,10 @@ import {
   effectiveBrain, brainArgs, setBrainOverride, spawnErrorNote,
 } from "../src/claude.js";
 import { loadState } from "../src/state.js";
+import { detectBrainAgent } from "../src/config.js";
 
-const ENV = { bin: "muse", subcommand: "exec", model: "", effort: "" };
+const ENV = { bin: "muse", agent: "muse", subcommand: "exec", model: "", effort: "" };
+const OC = { bin: "opencode", agent: "opencode", subcommand: "run", model: "", effort: "" };
 
 describe("validasi model/effort", () => {
   it("effort hanya menerima 8 tier (case-insensitive), selain itu default", () => {
@@ -79,6 +81,34 @@ describe("argumen spawn", () => {
       { ...ENV, bin: "Muse", subcommand: "" },
     );
     assert.deepEqual(brainArgs("KERJAKAN", b), ["-p", "KERJAKAN"]);
+  });
+  it("opencode: run --model --format json --auto --standalone <prompt>", () => {
+    const b = effectiveBrain({ model: "provider/model", effort: "high" }, OC);
+    assert.equal(b.agent, "opencode");
+    assert.deepEqual(brainArgs("KERJAKAN", b),
+      ["run", "--model", "provider/model", "--format", "json", "--auto", "--standalone", "KERJAKAN"]);
+  });
+  it("opencode: model/effort kosong dihilangkan, effort tak dipakai CLI ini", () => {
+    const b = effectiveBrain({ model: "", effort: "" }, OC);
+    assert.deepEqual(brainArgs("KERJAKAN", b), ["run", "--format", "json", "--auto", "--standalone", "KERJAKAN"]);
+  });
+  it("opencode: subcommand kosong → run", () => {
+    const b = effectiveBrain({ model: "", effort: "" }, { ...OC, subcommand: "" });
+    assert.deepEqual(brainArgs("KERJAKAN", b), ["run", "--format", "json", "--auto", "--standalone", "KERJAKAN"]);
+  });
+});
+
+describe("deteksi agen", () => {
+  it("explicit BRAIN_AGENT menang", () => {
+    assert.equal(detectBrainAgent("muse", "opencode"), "opencode");
+    assert.equal(detectBrainAgent("opencode", "muse"), "muse");
+  });
+  it("ditebak dari nama biner; lainnya = muse", () => {
+    assert.equal(detectBrainAgent("opencode"), "opencode");
+    assert.equal(detectBrainAgent("/usr/local/bin/OpenCode"), "opencode");
+    assert.equal(detectBrainAgent("muse"), "muse");
+    assert.equal(detectBrainAgent("claude"), "muse");
+    assert.equal(detectBrainAgent("muse", "aneh"), "muse"); // nilai asing diabaikan
   });
 });
 

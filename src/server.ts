@@ -16,7 +16,7 @@ import {
 import { logEvent } from "./state.js";
 import {
   addFromRepo, addFromZip, addBlank, addPrd, listProjects, removeProject, projectDir,
-  listFiles, readProjectFile, projectDiff, detectStack, isPreviewStack,
+  listFiles, readProjectFile, projectDiff, detectStack,
   autoCategories, normalizeStackSpec, prdSlice,
   STACK_OPTIONS, CATEGORY_TAXONOMY, CATEGORY_DIM_LABEL,
 } from "./projects.js";
@@ -57,7 +57,7 @@ function parseCategoriesInput(v: unknown, alt?: unknown): unknown {
 }
 import {
   createPreviewManager, readPreviewFile, resolveCommand as resolvePreviewCommand,
-  isStaticDir, previewNote, previewKind, isStandardStack, siteUrl, linkSite, lerdAvailable,
+  isStaticDir, previewNote, previewKind, isStandardStack, isMonorepo, siteUrl, linkSite, lerdAvailable,
 } from "./preview.js";
 import {
   startPipelineAuto, pausePipeline, resumePipeline, cancelPipeline,
@@ -218,7 +218,7 @@ function proxyToPort(req: IncomingMessage, res: ServerResponse, port: number, ta
 
 export function startServer(s: AltheaState, save: () => void, port: number, host: string): Server {
   const store = createStore();
-  const preview = createPreviewManager({ basePort: config.previewBasePort });
+  const preview = createPreviewManager({ basePort: config.previewBasePort, testPort: config.previewTestPort });
   const haltPreview = () => preview.stopAll();
   process.on("SIGINT", haltPreview);
   process.on("SIGTERM", haltPreview);
@@ -466,7 +466,7 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         if (!/\.zip$/i.test(file.fileName)) return json(res, { error: "only .zip files" }, 400);
         const stackRaw = parseStackInput(up.fields.stack, up.fields.techStack);
         const spec = normalizeStackSpec(stackRaw);
-        const r = addFromZip(s, name, file.fileName, file.data, {
+        const r = await addFromZip(s, name, file.fileName, file.data, {
           stack: spec,
           categories: autoCategories(parseCategoriesInput(up.fields.categories, up.fields.category), goal, spec),
         });
@@ -520,15 +520,6 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         const dir = projectDir(name);
         if (!dir || !existsSync(dir)) return json(res, { error: "unknown project" }, 404);
         const p = s.projects.find((x) => x.name === name);
-        if (p && !isPreviewStack(p.stackSpec)) {
-          return json(res, {
-            state: "stopped", mode: null, port: null, cmd: null, pid: null,
-            startedAt: null, reachable: null, error: null, url: null, logs: [],
-            kind: "none", previewAvailable: false, savedCmd: p.previewCmd || "",
-            isStatic: false,
-            cmdNote: "preview is only for the Laravel backend (served via lerd).",
-          });
-        }
         const stack = detectStack(dir);
         const info = await preview.status(name, dir, stack, p?.previewCmd || "");
         // Kind saat tak ada proses berjalan; proses yang sudah jalan tetap dikelola apa pun stacknya.
@@ -536,12 +527,16 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         const herd = kind === "herd";
         return json(res, {
           ...info,
-          ...(herd ? { url: siteUrl(name) } : {}),
+          ...(herd ? { url: siteUrl(name), tabUrl: siteUrl(name) } : {}),
           kind,
           previewAvailable: kind !== "none",
           savedCmd: p?.previewCmd || "",
           isStatic: isStaticDir(dir),
-          cmdNote: kind === "none" ? previewNote(stack, dir) : null,
+          cmdNote: kind === "none"
+            ? previewNote(stack, dir)
+            : (kind !== "herd" && isMonorepo(dir)
+              ? "monorepo — «npm run dev» at the root starts every app at once, each on its own port (e.g. web :5173 → name.test, api :3000 → api.test)."
+              : null),
           ...(herd ? { lerdOk: await lerdAvailable() } : {}),
         });
       }
@@ -555,9 +550,6 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
           const stopped = preview.stop(name);
           save();
           return json(res, { ok: true, stopped });
-        }
-        if (p && !isPreviewStack(p.stackSpec)) {
-          return json(res, { error: "preview is only for the Laravel backend (served via lerd)" }, 400);
         }
         // Stack standar: hubungkan ke lerd (disajikan sebagai namaproject.test, tanpa spawn).
         if (action === "link") {

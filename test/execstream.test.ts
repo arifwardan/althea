@@ -78,3 +78,63 @@ describe("exec stream", () => {
     assert.deepEqual(r.log, ["[!] boom"]);
   });
 });
+
+// ——— OpenCode (`opencode run --format json`) ———
+const oc = (type: string, part: unknown, extra: Record<string, unknown> = {}) =>
+  JSON.stringify({ type, ...extra, part });
+
+describe("exec stream opencode", () => {
+  it("text → transkrip terakumulasi", () => {
+    const s = createExecStream();
+    assert.equal(s.push(oc("text", { type: "text", text: "halo " })).text, "halo ");
+    assert.equal(s.push(oc("text", { type: "text", text: "dunia" })).text, "dunia");
+    assert.equal(s.transcript(), "halo dunia");
+  });
+  it("tool_use completed → aktivitas ✓ + baris pertama output", () => {
+    const s = createExecStream();
+    const r = s.push(oc("tool_use", {
+      type: "tool", id: "call_1", tool: "read",
+      state: { status: "completed", input: { path: "/a/b" }, output: "Read /a/b\n1|x" },
+    }));
+    assert.deepEqual(r.activities, [{ kind: "tool", text: "read ✓ — Read /a/b", tool: "read", ok: true }]);
+    assert.deepEqual(r.log, ["[tool] read ✓ — Read /a/b"]);
+  });
+  it("tool running → aktivitas …; duplikat status diabaikan", () => {
+    const s = createExecStream();
+    const line = oc("tool_use", {
+      type: "tool", id: "call_2", tool: "bash",
+      state: { status: "running", input: { command: "ls" } },
+    });
+    const r = s.push(line);
+    assert.deepEqual(r.activities, [{ kind: "tool", text: "bash …", tool: "bash" }]);
+    assert.deepEqual(s.push(line).activities, []); // status sama → dedup
+  });
+  it("tool error → aktivitas ✕ ok:false", () => {
+    const s = createExecStream();
+    const r = s.push(oc("tool_use", {
+      type: "tool", id: "call_3", tool: "bash",
+      state: { status: "error", output: "exit 1" },
+    }));
+    assert.equal(r.activities[0].ok, false);
+    assert.match(r.activities[0].text, /bash ✕/);
+  });
+  it("error → aktivitas note + log", () => {
+    const s = createExecStream();
+    const r = s.push(oc("error", {}, { error: { message: "quota exceeded" } }));
+    assert.deepEqual(r.activities, [{ kind: "note", text: "error: quota exceeded" }]);
+    assert.deepEqual(r.log, ["[!] quota exceeded"]);
+  });
+  it("step_start/step_finish/message/done = noise", () => {
+    const s = createExecStream();
+    for (const line of [
+      oc("step_start", { type: "step-start" }),
+      oc("step_finish", { type: "step-finish", reason: "tool-calls", cost: 0 }),
+      oc("message", { type: "message", role: "user" }),
+      oc("done", { type: "done" }),
+    ]) {
+      const r = s.push(line);
+      assert.deepEqual(r.log, []);
+      assert.deepEqual(r.activities, []);
+    }
+  });
+});

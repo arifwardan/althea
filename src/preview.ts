@@ -1,8 +1,12 @@
 // Preview aplikasi project: jalankan server dev di port terkelola (9111+),
 // atau sajikan file statis bila project berupa HTML polos.
 // Dashboard menampilkan via iframe same-origin (/app/* proxy, /preview-file/* statis).
+// Server dev ber-port tetap (mis. vite --port 5173) dideteksi otomatis lewat
+// pohon proses, sehingga preview tetap jalan di port aslinya — dan bila port
+// itu adalah port yang di-proxy Caddy (PREVIEW_TEST_PORT), preview dibuka
+// sebagai https://namaproject.test.
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from "node:fs";
 import { join, resolve, sep, normalize, extname } from "node:path";
 import { connect, createServer as createNetServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
@@ -35,9 +39,9 @@ export function isMonorepo(dir: string): boolean {
 
 /**
  * Command default per stack. {port} diganti port alokasi. null = wajib isi manual.
- * Kebijakan: hanya stack NON-standar TANPA dir yang punya default generik
- * (kompatibel lama). Dengan dir, default otomatis hanya untuk kasus aman;
- * app non-standar = tanpa default (preview not available, manual bila perlu).
+ * Kebijakan: folder dengan «dev» script (termasuk monorepo — «npm run dev»
+ * di root menjalankan semua app sekaligus, masing-masing di portnya sendiri)
+ * mendapat default «npm run dev». Laravel standar → lerd (bukan spawn).
  */
 export function defaultCommand(stack: string, dir?: string): string | null {
   if (!dir) {
@@ -46,7 +50,12 @@ export function defaultCommand(stack: string, dir?: string): string | null {
     return null;
   }
   if (isStandardStack(dir)) return null; // Laravel standar via lerd, bukan spawn
-  return null; // non-standar: tanpa default (preview not available / manual)
+  if (readDevScript(dir)) return "npm run dev";
+  if (stack === "python" && existsSync(join(dir, "manage.py"))) {
+    return "python3 manage.py runserver 127.0.0.1:{port}";
+  }
+  if (stack === "go" && existsSync(join(dir, "go.mod"))) return "go run .";
+  return null; // tanpa petunjuk dev → isi manual
 }
 
 export function resolveCommand(stack: string, override?: string, dir?: string): string {
@@ -72,13 +81,13 @@ export type PreviewKind = "static" | "herd" | "server" | "none";
 
 /**
  * Jenis preview project: static (file, auto), herd (Laravel standar via lerd),
- * server (punya command tersimpan/manual → spawn), none (preview not available).
+ * server (punya command tersimpan/manual/default → spawn), none (preview not available).
  * hasCmd = ada command tersimpan/eksplisit (escape hatch config manual).
  */
 export function previewKind(stack: string, dir: string, hasCmd: boolean): PreviewKind {
   if (isStaticDir(dir)) return "static";
   if (isStandardStack(dir)) return "herd";
-  if (hasCmd) return "server";
+  if (hasCmd || defaultCommand(stack, dir)) return "server";
   return "none";
 }
 
@@ -86,9 +95,9 @@ export function previewKind(stack: string, dir: string, hasCmd: boolean): Previe
 export function previewNote(stack: string, dir: string): string | null {
   if (previewKind(stack, dir, false) !== "none") return null;
   if (stack === "node" && isMonorepo(dir)) {
-    return "preview not available — monorepo («npm run dev» at the root starts every app at once). Althea standard: Laravel + Svelte via lerd.";
+    return "monorepo without a root «dev» script — add one, or enter a manual preview command per app (e.g. «npm run dev --workspace=apps/web»; {port} is substituted automatically).";
   }
-  return "preview not available for this stack — Althea standard: Laravel + Svelte, served via lerd (nameproject.test).";
+  return "preview not available — no dev command found for this folder. Add a package.json with a «dev» script or enter a preview command manually.";
 }
 
 /** Domain lerd yang aman dari nama project: "Simalik" → "simalik.test". */
@@ -100,6 +109,105 @@ export function siteDomain(name: string): string {
 /** URL preview untuk stack standar (disajikan lerd, HTTPS). */
 export function siteUrl(name: string): string {
   return `https://${siteDomain(name)}`;
+}
+
+/**
+ * Tebak port dev dari command + scripts package.json (root + apps/*, packages/*).
+ * Dipakai untuk menunggu server dev ber-port tetap (mis. «vite dev --port 5173»)
+ * yang mengabaikan port alokasi preview.
+ */
+export function portCandidates(cmd: string, dir: string): number[] {
+  const out: number[] = [];
+  const push = (raw: string): void => {
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0 && n < 65536 && !out.includes(n)) out.push(n);
+  };
+  for (const m of cmd.matchAll(/--port[=\s]+(\d+)/g)) push(m[1]);
+  for (const m of cmd.matchAll(/(?:^|[\s&;|])-p\s+(\d+)(?![\w-])/g)) push(m[1]);
+  const scan = (d: string): void => {
+    const s = readDevScript(d);
+    if (s) for (const m of s.matchAll(/--port[=\s]+(\d+)/g)) push(m[1]);
+  };
+  scan(dir);
+  for (const sub of ["apps", "packages", "services"]) {
+    let ents: string[] = [];
+    try { ents = readdirSync(join(dir, sub)); } catch { continue; }
+    for (const e of ents) {
+      if (e.startsWith(".") || e.startsWith("_")) continue;
+      scan(join(dir, sub, e));
+    }
+  }
+  return out;
+}
+
+/**
+ * Port TCP yang sedang didengarkan oleh pohon proses (anak/cucu) dari rootPid.
+ * Scan /proc khusus Linux; platform lain → kosong (fallback ke kandidat).
+ */
+export function treeListenPorts(rootPid: number | undefined): Set<number> {
+  const out = new Set<number>();
+  if (process.platform !== "linux" || rootPid === undefined || rootPid <= 0) return out;
+  try {
+    // 1) Kumpulkan keturunan rootPid (PPid tiap /proc/<pid>/stat).
+    const tree = new Set<number>([rootPid]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const ent of readdirSync("/proc")) {
+        if (!/^\d+$/.test(ent)) continue;
+        const pid = Number(ent);
+        if (tree.has(pid)) continue;
+        let stat = "";
+        try { stat = readFileSync(`/proc/${pid}/stat`, "utf8"); } catch { continue; }
+        const close = stat.lastIndexOf(")");
+        if (close < 0) continue;
+        const rest = stat.slice(close + 1).trim().split(/\s+/);
+        const ppid = Number(rest[1]);
+        if (tree.has(ppid)) { tree.add(pid); grew = true; }
+      }
+    }
+    // 2) Inode socket tiap proses di pohon (fd → socket:[inode]).
+    const inodes = new Set<string>();
+    for (const pid of tree) {
+      let fds: string[] = [];
+      try { fds = readdirSync(`/proc/${pid}/fd`); } catch { continue; }
+      for (const fd of fds) {
+        let link = "";
+        try { link = readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
+        const m = link.match(/^socket:\[(\d+)\]$/);
+        if (m) inodes.add(m[1]);
+      }
+    }
+    if (!inodes.size) return out;
+    // 3) Port LISTEN (st=0A) dari /proc/net/tcp{,6} dengan inode cocok.
+    for (const f of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+      let txt = "";
+      try { txt = readFileSync(f, "utf8"); } catch { continue; }
+      for (const line of txt.split("\n").slice(1)) {
+        const cols = line.trim().split(/\s+/);
+        if (cols.length < 10 || cols[3] !== "0A" || !inodes.has(cols[9])) continue;
+        const port = parseInt(cols[1].split(":")[1] || "", 16);
+        if (port > 0) out.add(port);
+      }
+    }
+  } catch { /* abaikan: fallback ke kandidat */ }
+  return out;
+}
+
+/**
+ * Pilih port preview dari port yang terdeteksi: cocok dengan port .test
+ * (Caddy) → kandidat → terdekat kandidat → terkecil. null bila belum ada.
+ */
+export function pickPort(found: Set<number>, candidates: number[], testPort?: number | null): number | null {
+  if (!found.size) return null;
+  if (testPort && found.has(testPort)) return testPort;
+  for (const c of candidates) if (found.has(c)) return c;
+  const arr = [...found].sort((a, b) => a - b);
+  if (candidates.length) {
+    const ref = candidates[0];
+    return arr.reduce((best, p) => (Math.abs(p - ref) < Math.abs(best - ref) ? p : best), arr[0]);
+  }
+  return arr[0];
 }
 
 export interface LerdResult { ok: boolean; output: string }
@@ -271,14 +379,16 @@ export interface PreviewInfo {
   startedAt: string | null;
   reachable: boolean | null;
   error: string | null;
-  url: string | null; // path same-origin untuk iframe
+  url: string | null; // path same-origin / port langsung untuk iframe
+  tabUrl: string | null; // URL "buka tab baru" (name.test bila tersedia)
   logs: string[];
 }
 
 interface Rec {
   child: ChildProcess | null; // mode server
   http: HttpServer | null; // mode static: penyaji file dalam proses
-  port: number | null;
+  port: number | null; // port yang didengarkan app (ditemukan/dikelola)
+  managedPort: number | null; // port alokasi 9111+ (command {port}/PORT)
   cmd: string | null;
   dir: string;
   mode: "static" | "server";
@@ -293,33 +403,49 @@ export interface PreviewManagerOpts {
   basePort?: number;
   maxProcs?: number;
   readyTimeoutMs?: number;
+  testPort?: number | null; // port yang di-proxy Caddy ke *.test (null = tak ada)
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * URL untuk iframe/"buka tab".
+ * URL untuk iframe preview.
  * Selalu LANGSUNG ke port preview (bukan prefix /app/): tiap preview punya
  * origin sendiri sehingga aset ber-path absolut ("/assets/...", "/_next/..."),
  * fetch, module script, dan storage app modern tetap jalan — sekaligus
- * terisolasi dari origin dashboard. Fallback path hanya bila port belum ada.
+ * terisolasi dari origin dashboard. Statis tanpa port → fallback path.
+ * Server tanpa port (belum terdeteksi) → null.
  */
-export function previewUrlFor(name: string, mode: "static" | "server", port: number | null): string {
-  if (port !== null) return `http://127.0.0.1:${port}/`;
-  const n = encodeURIComponent(name);
-  return `/api/projects/${n}/preview-file/`;
+export function previewUrlFor(name: string, mode: "static" | "server", port: number | null): string | null {
+  if (port === null) {
+    return mode === "static" ? `/api/projects/${encodeURIComponent(name)}/preview-file/` : null;
+  }
+  return `http://127.0.0.1:${port}/`;
+}
+
+/**
+ * URL "buka tab baru". Server dev yang mendengarkan di port yang di-proxy
+ * Caddy ke *.test (PREVIEW_TEST_PORT, mis. 5173) dibuka sebagai
+ * https://namaproject.test; selain itu langsung ke port preview.
+ */
+export function tabUrlFor(name: string, mode: "static" | "server", port: number | null, testPort?: number | null): string | null {
+  const direct = previewUrlFor(name, mode, port);
+  if (direct === null) return null;
+  if (mode === "server" && testPort && port === testPort) return siteUrl(name);
+  return direct;
 }
 
 export function createPreviewManager(opts: PreviewManagerOpts = {}) {
   const basePort = opts.basePort || 9111;
   const maxProcs = opts.maxProcs || 8;
   const readyTimeoutMs = opts.readyTimeoutMs || 12_000;
+  const testPort = opts.testPort ?? null;
   const recs = new Map<string, Rec>();
   const usedPorts = new Set<number>();
 
   const stopped = (): PreviewInfo => ({
     state: "stopped", mode: null, port: null, cmd: null, pid: null,
-    startedAt: null, reachable: null, error: null, url: null, logs: [],
+    startedAt: null, reachable: null, error: null, url: null, tabUrl: null, logs: [],
   });
 
   function pushLog(rec: Rec, line: string): void {
@@ -336,7 +462,8 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
       state: rec.state, mode: rec.mode, port: rec.port, cmd: rec.cmd,
       pid: rec.child?.pid || null, startedAt: rec.startedAt,
       reachable: rec.mode === "static" ? true : rec.reachable,
-      error: rec.error, url: previewUrlFor(name, rec.mode, rec.port), logs: [...rec.logs],
+      error: rec.error, url: previewUrlFor(name, rec.mode, rec.port),
+      tabUrl: tabUrlFor(name, rec.mode, rec.port, testPort), logs: [...rec.logs],
     };
   }
 
@@ -386,25 +513,47 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     usedPorts.add(port);
     const finalCmd = cmd.split("{port}").join(String(port));
     const fp = splitCmd(finalCmd);
+    // Petunjuk port dari command + package.json (root + apps/*): server dev
+    // ber-port tetap (mis. vite --port 5173) mengabaikan PORT alokasi.
+    const cands = portCandidates(finalCmd, dir);
     const rec: Rec = {
-      child: null, http: null, port, cmd: finalCmd, dir, mode: "server",
-      state: "starting", startedAt: new Date().toISOString(),
+      child: null, http: null, port, managedPort: port, cmd: finalCmd, dir,
+      mode: "server", state: "starting", startedAt: new Date().toISOString(),
       reachable: false, error: null, logs: [],
     };
     recs.set(name, rec);
     pushLog(rec, `$ ${finalCmd}  (port ${port})`);
+    // Dev server ber-port tetap mungkin SUDAH jalan (dihidupkan di luar
+    // Althea). Bila port .test sudah didengarkan, pakai ulang — jangan
+    // spawn duplikat (yang baru justru akan pindah port karena bentrok).
+    if (testPort && cands.includes(testPort) && await portOpen(testPort, 300)) {
+      usedPorts.delete(port);
+      rec.managedPort = null;
+      rec.port = testPort;
+      rec.state = "running";
+      rec.reachable = true;
+      pushLog(rec, `dev server already listening on :${testPort} — reused (not spawned by althea)`);
+      return toInfo(name, rec);
+    }
     let child: ChildProcess;
     try {
       child = spawn(fp[0], fp.slice(1), {
         cwd: dir, shell: false,
         detached: process.platform !== "win32", // group sendiri → killChild matikan sepohon
         // PORT+HOST umum; HOSTNAME untuk Next.js ("next dev" mengabaikan HOST).
-        env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", HOSTNAME: "127.0.0.1" },
+        // PORT hanya dipaksa bila command memakai {port} atau tak ada petunjuk
+        // port — app ber-port tetap (vite --port 5173, tsx :3000) memakai
+        // port deklarasinya sendiri agar *.test (Caddy) tetap mengarah betul.
+        env: {
+          ...process.env,
+          ...(cmd.includes("{port}") || !cands.length ? { PORT: String(port) } : {}),
+          HOST: "127.0.0.1", HOSTNAME: "127.0.0.1",
+        },
       });
     } catch (e) {
       rec.state = "failed";
       rec.error = `spawn failed: ${String(e)}`;
-      usedPorts.delete(port);
+      if (rec.managedPort !== null) usedPorts.delete(rec.managedPort);
       return toInfo(name, rec);
     }
     rec.child = child;
@@ -419,14 +568,18 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
     });
     child.on("close", (code) => {
       pushLog(rec, `[exited with code ${code}]`);
-      usedPorts.delete(port);
+      if (rec.managedPort !== null) usedPorts.delete(rec.managedPort);
       if (rec.state === "starting" || rec.state === "running") {
         rec.state = "failed";
         rec.error = rec.error || `process died on its own (code ${code}) — check the log`;
       }
     });
-    // Tunggu port merespons; proses hidup tapi port diam = running + reachable=false.
+    // Tunggu port merespons: port alokasi (app yang hormati PORT) ATAU port
+    // tetap app (ditemukan lewat pohon proses — vite --port 5173 dkk.).
+    // Bila port .test termasuk kandidat, tunggu ia lebih dulu (frontend
+    // biasanya boot paling akhir); port lain dicatat sebagai fallback.
     const t0 = Date.now();
+    let fallback: number | null = null;
     while (Date.now() - t0 < readyTimeoutMs) {
       if (rec.state === "failed") return toInfo(name, rec);
       if (await portOpen(port, 400)) {
@@ -434,11 +587,29 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
         rec.reachable = true;
         return toInfo(name, rec);
       }
+      const found = treeListenPorts(child.pid);
+      const picked = pickPort(found, cands, testPort);
+      if (picked !== null && picked !== port) {
+        if (testPort && cands.includes(testPort) && !found.has(testPort)) {
+          fallback = picked;
+        } else {
+          rec.port = picked;
+          rec.state = "running";
+          rec.reachable = true;
+          pushLog(rec, `dev server listening on :${picked}`);
+          return toInfo(name, rec);
+        }
+      }
       await sleep(300);
     }
     if (rec.state === "starting") {
       rec.state = "running"; // proses hidup; mungkin bind lambat / port lain
-      rec.reachable = false;
+      if (fallback !== null) {
+        rec.port = fallback;
+        rec.reachable = await portOpen(fallback, 400);
+      } else {
+        rec.reachable = false;
+      }
     }
     return toInfo(name, rec);
   }
@@ -454,7 +625,7 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
       try { rec.http.close(); } catch { /* abaikan */ }
       rec.http = null;
     }
-    if (rec.port !== null) usedPorts.delete(rec.port);
+    if (rec.managedPort !== null) usedPorts.delete(rec.managedPort);
     recs.delete(name);
     return true;
   }
@@ -481,7 +652,7 @@ export function createPreviewManager(opts: PreviewManagerOpts = {}) {
       return { ...stopped(), state: "failed", error: "preview ports 9111–9200 are full" };
     }
     const rec: Rec = {
-      child: null, http: null, port, cmd: null, dir, mode: "static",
+      child: null, http: null, port, managedPort: port, cmd: null, dir, mode: "static",
       state: "starting", startedAt: new Date().toISOString(),
       reachable: false, error: null, logs: [],
     };

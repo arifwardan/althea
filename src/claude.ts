@@ -58,14 +58,15 @@ export type BrainSource = "dashboard" | "env" | "cli-default";
 
 export interface EffectiveBrain {
   bin: string;
-  subcommand: string; // "exec" | "" (gaya lama -p)
+  agent: string; // "muse" (Muse Code) | "opencode" (OpenCode)
+  subcommand: string; // "exec" | "run" | "" (gaya lama -p)
   model: string;
   effort: string;
   modelSource: BrainSource;
   effortSource: BrainSource;
 }
 
-export interface BrainEnv { bin: string; subcommand: string; model: string; effort: string; }
+export interface BrainEnv { bin: string; agent: string; subcommand: string; model: string; effort: string; }
 
 // Override modul: diset dari state saat boot + tiap PUT /api/brain.
 let override: BrainOverride = { model: "", effort: "" };
@@ -76,6 +77,7 @@ export function setBrainOverride(o: { model?: unknown; effort?: unknown }): void
 
 const defaultEnv = (): BrainEnv => ({
   bin: config.brainBin,
+  agent: config.brainAgent,
   subcommand: config.brainSubcommand,
   model: normalizeModel(config.brainModel),
   effort: normalizeEffort(config.brainEffort),
@@ -87,6 +89,7 @@ export function effectiveBrain(o: BrainOverride = override, env: BrainEnv = defa
   const effort = o.effort || env.effort;
   return {
     bin: env.bin,
+    agent: env.agent,
     subcommand: env.subcommand,
     model,
     effort,
@@ -136,8 +139,23 @@ export function effectiveTimeoutSeconds(
   return { seconds: TIMEOUT_DEFAULT_SECONDS, source: "default" };
 }
 
-/** Susun argv spawn. Flags model/effort hanya untuk gaya exec (terverifikasi); gaya lama tetap -p. */
+/** Susun argv spawn per agen. */
 export function brainArgs(prompt: string, b: EffectiveBrain = effectiveBrain()): string[] {
+  // OpenCode: `opencode run [--model provider/model] --format json --auto --standalone <prompt>`.
+  // --format json → stream event JSONL (diterjemah ExecStream);
+  // --auto → auto-approve izin yang tak ditolak eksplisit (setara
+  // --disable-approval muse: althea punya jalur izin sendiri via web/Telegram,
+  // run headless tak bisa menjawab approval interaktif);
+  // --standalone → server privat per run (tidak bergantung pada — atau
+  // bertabrakan dengan — layanan latar opencode milik user).
+  if (b.agent === "opencode") {
+    const args = [b.subcommand || "run"];
+    if (b.model) args.push("--model", b.model);
+    args.push("--format", "json", "--auto", "--standalone");
+    args.push(prompt);
+    return args;
+  }
+  // Muse Code (gaya exec; subcommand kosong = gaya lama -p).
   if (!b.subcommand) return ["-p", prompt];
   const args = [b.subcommand];
   if (b.model) args.push("--model", b.model);
@@ -168,7 +186,7 @@ export function spawnErrorNote(bin: string, err: unknown): string {
 /** Ringkasan satu baris untuk log boot. */
 export function brainSummary(b: EffectiveBrain = effectiveBrain()): string {
   const cmd = b.subcommand ? `${b.bin} ${b.subcommand}` : `${b.bin} -p`;
-  return `${cmd} · model ${b.model || "default"} · effort ${b.effort || "default"}`;
+  return `[${b.agent}] ${cmd} · model ${b.model || "default"} · effort ${b.effort || "default"}`;
 }
 
 // Pola pesan limit/kuota dari CLI/API (dicocokkan case-insensitive).
@@ -217,6 +235,10 @@ export function runClaude(
     const timeoutSecs = effectiveTimeoutSeconds().seconds;
     const child = spawn(brain.bin, brainArgs(prompt, brain), {
       shell: false,
+      // stdin ditutup (EOF langsung): opencode membaca stdin bila
+      // pesannya kosong/tidak ada — dengan pipe terbuka run gantung
+      // selamanya. stdout/stderr tetap pipa untuk stream JSONL.
+      stdio: ["ignore", "pipe", "pipe"],
       ...(cwd ? { cwd } : {}),
     });
     const ref = { child, killed: false };

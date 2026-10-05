@@ -866,7 +866,7 @@
     <span class="pill {aiState.cls}"><span class="pdot"></span>{aiState.label}</span>
     {#if brain}
       <button class="ghost brain-badge" onclick={() => { view = "system"; }} title="active brain — click to change in System">
-        {brain.bin} · {brain.model || "default"} · {brain.effort || "default"}
+        {brain.agent === "opencode" ? "opencode · " : ""}{brain.bin} · {brain.model || "default"} · {brain.effort || "default"}
       </button>
     {/if}
     <span class="clock">{new Date(now).toLocaleString("en-US")}</span>
@@ -1228,7 +1228,7 @@
         <div class="fsect">1 · basics</div>
         <label for="pn">project name</label>
         <input id="pn" class="bigname" type="text" bind:value={projName} placeholder="e.g. pos-kasir — lowercase, no spaces" autocomplete="off" />
-        <div class="fhelp">The name becomes the folder in workspace/{#if projMode === "prompt" || projMode === "prd"} and the .test address via lerd for the default stack{/if}.</div>
+        <div class="fhelp">The name becomes the folder in workspace/{#if projMode === "prompt" || projMode === "prd"} — and the .test address (name.test) once its dev server runs on the preview port{/if}.</div>
       </div>
       <div class="fcard">
         <div class="fsect">2 · source</div>
@@ -1262,7 +1262,7 @@
       {#if projMode === "prompt" || projMode === "prd"}
       <div class="fcard">
         <div class="fsect">3 · tech_stack</div>
-        <div class="fhelp">Click to pick per layer. Laravel backend = preview via lerd; other backends have no preview.</div>
+        <div class="fhelp">Click to pick per layer. Laravel backend = preview via lerd (name.test); other backends preview via their own dev server.</div>
         {#if meta?.stackOptions}
           <div class="stackgrid2">
             {#each STACK_DIMS as d}
@@ -1282,7 +1282,7 @@
           <div class="hint">backend is still the old version — restart the backend then reload this page.</div>
         {/if}
         {#if projStack.be !== "laravel"}
-          <div class="hint" style="margin-top:8px">non-Laravel backend — preview (lerd) is not available for this project.</div>
+          <div class="hint" style="margin-top:8px">non-Laravel backend — preview runs the project's dev server (no lerd); name.test opens it when the dev server binds the preview port.</div>
         {/if}
       </div>
       <div class="fcard">
@@ -1458,13 +1458,13 @@
         {#if !pvInfo}
           <span class="v-dim">loading…</span>
         {:else if pvInfo.previewAvailable === false}
-          <div class="hint">{pvInfo.cmdNote || "preview not available for this stack — Althea standard: Laravel + Svelte via lerd."}</div>
+          <div class="hint">{pvInfo.cmdNote || "preview not available for this stack — add a «dev» script to package.json or enter a preview command."}</div>
         {:else if pvInfo.kind === "herd"}
           <div class="row">
             <span class="k">url</span>
             <span>{pvInfo.url}</span>
-            {#if pvInfo.url}
-              <a class="ghostlink" href={pvInfo.url} target="_blank" rel="noreferrer">[open tab]</a>
+            {#if pvInfo.tabUrl || pvInfo.url}
+              <a class="ghostlink" href={pvInfo.tabUrl || pvInfo.url || ""} target="_blank" rel="noreferrer">[open tab]</a>
             {/if}
             <span style="margin-left:auto; display:flex; gap:6px">
               <button class="ghost" onclick={pvLink} disabled={pvBusy}>[link to lerd]</button>
@@ -1487,8 +1487,9 @@
             {:else}
               <span class="pill v-dim"><span class="pdot"></span>stopped</span>
             {/if}
-            {#if pvInfo.url && pvInfo.state === "running"}
-              <a class="ghostlink" href={pvInfo.url} target="_blank" rel="noreferrer">[open tab]</a>
+            {#if (pvInfo.tabUrl || pvInfo.url) && pvInfo.state === "running"}
+              <span class="v-ok" title="preview address — Caddy mem-proxy *.test ke port dev">{pvInfo.tabUrl || pvInfo.url}</span>
+              <a class="ghostlink" href={pvInfo.tabUrl || pvInfo.url || ""} target="_blank" rel="noreferrer">[open tab]</a>
             {/if}
             <span style="margin-left:auto; display:flex; gap:6px">
               <button class="ghost" onclick={pvRefresh} disabled={pvBusy}>[refresh]</button>
@@ -1502,9 +1503,9 @@
           </div>
           {#if pvInfo.error}<div class="err">✕ {pvInfo.error}</div>{/if}
           {#if pvInfo.state === "running" && pvInfo.reachable === false}
-            <div class="hint">process is running but port {pvInfo.port} is not responding — the app may bind another port. Check the log / adjust the command.</div>
+            <div class="hint">process is running but no preview port was detected — the app may bind a port outside its dev script. Check the log / adjust the command.</div>
           {:else if pvInfo.state === "running" && pvInfo.mode === "server"}
-            <div class="hint">iframe goes straight to 127.0.0.1:{pvInfo.port} so the app's absolute paths ("/assets/…") keep working.</div>
+            <div class="hint">iframe opens 127.0.0.1:{pvInfo.port} directly (own origin — absolute paths keep working); [open tab] uses {pvInfo.tabUrl || pvInfo.url}.</div>
           {/if}
           {#if pvInfo.mode !== "static" || pvInfo.state !== "running"}
             <label for="pvcmd">preview command — runs in the project folder (write {"{port}"} if the app needs an explicit port)</label>
@@ -1646,7 +1647,7 @@
           <CardContent>
             <div class="border-b border-border pb-4">
               <div class="mb-2 text-xs font-medium">model_control</div>
-              <div class="mb-3 truncate text-xs text-muted-foreground">{brain ? `${brain.bin}${brain.subcommand ? " " + brain.subcommand : " -p"}` : "…"} · {brain?.model || "default CLI"} ({brain?.modelSource || "…"}) · {brain?.effort || "default CLI"} ({brain?.effortSource || "…"})</div>
+              <div class="mb-3 truncate text-xs text-muted-foreground">{brain ? `${brain.agent === "opencode" ? "opencode · " : ""}${brain.bin}${brain.subcommand ? " " + brain.subcommand : " -p"}` : "…"} · {brain?.model || "default CLI"} ({brain?.modelSource || "…"}) · {brain?.effort || "default CLI"} ({brain?.effortSource || "…"})</div>
               <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label for="bmodel" class="mb-1 block text-xs font-medium">model</label>

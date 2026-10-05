@@ -1,10 +1,17 @@
-// Penerjemah stream JSONL `muse exec --json` → baris log ramah + aktivitas.
-// Bentuk event (terverifikasi dari run nyata):
+// Penerjemah stream JSONL `muse exec --json` DAN `opencode run --format json`
+// → baris log ramah + aktivitas.
+// Bentuk event Muse (terverifikasi dari run nyata):
 // - task_kind "tool.<nama>" (proposed) = tool dipanggil (argumen TAK diekspos CLI)
 // - "tool.result" {correlation_facts.tool_name, text, outcome} = hasil tool
 // - "run.output.delta" {text} = potongan jawaban akhir (streaming)
 // - "run.terminal.completed" {text} = jawaban akhir utuh (otoritatif)
 // - task.lifecycle.status {message} = status model (kecuali reminder.*)
+// Bentuk event OpenCode (v2, terverifikasi dari run nyata):
+// - {"type":"text","part":{"type":"text","text":…}} = potongan jawaban
+// - {"type":"tool_use","part":{"type":"tool","tool":"<nama>","id":"call_…",
+//    "state":{"status":"running|completed|error","input":{…},"output":"…"}}} = tool
+// - {"type":"error", …} = error run
+// - step_start/step_finish/message/session/done = noise
 // Baris non-JSON (mis. "muse: ...") diteruskan apa adanya.
 export interface StreamActivity {
   kind: "tool" | "file" | "note";
@@ -26,6 +33,7 @@ export interface ExecStream {
 
 export function createExecStream(): ExecStream {
   const seenTasks = new Set<string>();
+  const seenTools = new Set<string>();
   const chunks: string[] = [];
   let terminal: string | null = null;
   const empty = (): StreamPush => ({ log: [], activities: [], text: "" });
@@ -49,6 +57,43 @@ export function createExecStream(): ExecStream {
       const pt = String(o.payload_type || "");
       const p = (o.payload || {}) as Record<string, unknown>;
       const ev = (p.event || {}) as Record<string, unknown>;
+      // ——— OpenCode: event "type" + "part" (muse pakai "payload_type") ———
+      if (!pt && o.type) {
+        const oc = String(o.type);
+        const part = (o.part || {}) as Record<string, unknown>;
+        if (oc === "text" && part.type === "text" && typeof part.text === "string") {
+          r.text = part.text;
+          chunks.push(part.text);
+          return r;
+        }
+        if (part.type === "tool" || oc === "tool_use") {
+          const raw = part.tool;
+          const name = typeof raw === "string" ? raw : String((raw as { name?: unknown } | null)?.name || "tool");
+          const callId = String(part.id || "");
+          const state = (part.state || {}) as Record<string, unknown>;
+          const status = String(state.status || "running");
+          const running = status === "" || status === "running";
+          const okRes = status !== "error" && status !== "failed";
+          const dedup = `${callId}:${status}`;
+          if (callId && seenTools.has(dedup)) return r;
+          if (callId) seenTools.add(dedup);
+          const first = String(state.output || "").split("\n")[0].trim().slice(0, 140);
+          const mark = running ? "…" : okRes ? "✓" : "✕";
+          const text = first ? `${name} ${mark} — ${first}` : `${name} ${mark}`;
+          r.activities.push({ kind: "tool", text, tool: name, ...(running ? {} : { ok: okRes }) });
+          r.log.push(`[tool] ${text}`);
+          return r;
+        }
+        if (oc === "error") {
+          const e = o.error;
+          const msg = (typeof e === "string" ? e : String((e as { message?: unknown } | null)?.message || o.message || "error")).slice(0, 200);
+          r.activities.push({ kind: "note", text: `error: ${msg}` });
+          r.log.push(`[!] ${msg}`);
+          return r;
+        }
+        return r; // step_start/step_finish/message/session/done: noise
+      }
+      // ——— Muse Code ———
       if (pt === "run.output.delta" && typeof p.text === "string") {
         r.text = p.text;
         chunks.push(p.text);
