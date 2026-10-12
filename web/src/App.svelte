@@ -1966,7 +1966,7 @@
                 <input id="totime" type="number" inputmode="numeric" bind:value={timeoutInput} placeholder={limits ? `e.g. 3600 (min ${limits.min}, max ${limits.max})` : "e.g. 3600"} autocomplete="off" class={cInput} />
               </div>
             </div>
-          </div>
+          </Card.Content>
           <Card.Footer>
             <Button variant="default" onclick={saveBrain} disabled={busy === "brain"}>save brain</Button>
             <Button variant="default" onclick={saveLimits} disabled={busy === "limits"}>save timeout</Button>
