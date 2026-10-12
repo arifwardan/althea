@@ -4,8 +4,9 @@
 // loop utama menanganinya (limit = gagalkan tugas, kill = kill-switch).
 import { StateGraph, START, END, Annotation } from "@langchain/langgraph";
 import { runClaude, type ClaudeResult } from "../claude.js";
+import { boundToDir } from "../workflow.js";
 import { contextTree, projectDiff, readStandards, prdSlice } from "../projects.js";
-import { runVerifyGates } from "../verify.js";
+import { runVerifyGates, isDocsOnlyDiff } from "../verify.js";
 import type { StackTask } from "../state.js";
 
 /** Limit kuota di tengah graph → driver menggagalkan tugas (progres aman di task.graph). */
@@ -254,6 +255,14 @@ export function buildGraph(opts: {
       // Dilewati bila: dry-run, tanpa cwd, atau verify=false.
       if (autoApprove || !verifyCfg || !cwd) return {};
       onEvent?.("graph → verify (0 LLM tokens)");
+      // Perubahan hanya dokumen (mis. PRD.md) tak bisa merusak build —
+      // gate kode dilewati agar tugas tak gagal oleh build yang memang rusak.
+      const pre = await getDiff();
+      if (isDocsOnlyDiff(pre)) {
+        const note = "[verify] skipped — docs-only change, code gates not applicable";
+        onLine?.(`[verify] ${note}`);
+        return { verifyOk: true, outputs: [`[verify]\n${note}`] };
+      }
       const v = await runVerifyGates(cwd, verifyCfg.scripts, verifyCfg.timeoutMs);
       onLine?.(`[verify] ${v.summary.split("\n")[0]}`);
       if (!v.ok) {
@@ -292,7 +301,10 @@ export async function runGraphTask(o: GraphOpts): Promise<GraphResult> {
     standards ? `<PROJECT STANDARDS (must follow):>\n${standards}\n</PROJECT STANDARDS>` : "",
     slice ? `<PRD SUMMARY (read the full PRD.md only if this slice is insufficient):>\n${slice}\n</PRD SUMMARY>` : "",
   ].filter(Boolean).join("\n\n");
-  const augmentedPrompt = extras ? `${o.task.prompt}\n\n${extras}` : o.task.prompt;
+  const withExtras = extras ? `${o.task.prompt}\n\n${extras}` : o.task.prompt;
+  // Tugas ber-project jalan dengan cwd folder itu: prompt dikungkung agar AI
+  // tak keluar (pernah: tugas sipandu membaca folder project tetangga).
+  const augmentedPrompt = o.cwd ? boundToDir(withExtras, o.cwd) : withExtras;
   const getDiff = o.getDiff || (async () => {
     if (!o.task.project) return "(no project — review from text output)";
     const d = await projectDiff(o.task.project);

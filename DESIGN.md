@@ -70,6 +70,7 @@ Kunci jalan-ulang tanpa prompt ulang: **prompt lengkap tersimpan per tugas di `s
 | POST | `/api/tasks/:id/correct` | `{correction}` → hentikan run + tempel arahan ke prompt + antre ulang | Ya |
 | DELETE | `/api/tasks/:id` | Hapus tugas permanen (proses dimatikan, pipeline fase ikut jeda) | Ya |
 | POST | `/api/tasks/:id/rerun` | Tugas done/failed → queued lagi tanpa ubah prompt | Ya |
+| POST | `/api/tasks/:id/reviewed` | Centang selesai sudah di-review (non-blokir) | Ya |
 | GET | `/api/tasks/:id/log` | SSE log output Muse (200 baris terakhir) | Ya |
 | GET | `/api/projects/:n/diff` | Git diff + status untracked (100 KB) | Ya |
 | GET | `/api/projects/:n/files` | Pohon file (200 entri, skip berat) | Ya |

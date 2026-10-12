@@ -6,7 +6,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import type { AltheaState } from "./state.js";
 import { config } from "./config.js";
-import { pushTask, pushFollowup, resolveApproval, cancelTask, correctTask, deleteTask, requeueTask } from "./workflow.js";
+import { pushTask, pushFollowup, resolveApproval, cancelTask, correctTask, deleteTask, requeueTask, markReviewed } from "./workflow.js";
 import {
   killRunning, setBrainOverride, effectiveBrain, listBrainModels,
   normalizeEffort, normalizeModel, normalizeBin, normalizeAgent, BRAIN_EFFORTS,
@@ -651,6 +651,13 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         const ok = requeueTask(s, id);
         if (!ok) return json(res, { ok: false, error: "only done/failed tasks can be re-run" }, 400);
         forceWake(s, `rerun ${id}`);
+        save();
+        return json(res, { ok });
+      }
+      if (req.method === "POST" && path.startsWith("/api/tasks/") && path.endsWith("/reviewed")) {
+        const id = decodeURIComponent(path.slice("/api/tasks/".length, -"/reviewed".length));
+        const ok = markReviewed(s, id);
+        if (!ok) return json(res, { ok: false, error: "not a pending-review task" }, 400);
         save();
         return json(res, { ok });
       }

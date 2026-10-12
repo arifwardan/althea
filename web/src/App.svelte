@@ -13,6 +13,7 @@
   import Input from "./lib/components/ui/input.svelte";
   import Select from "./lib/components/ui/select.svelte";
   import Progress from "./lib/components/ui/progress.svelte";
+  import * as Tabs from "./lib/components/ui/tabs/index.js";
   let meta = $state(null);
   let snap = $state(null);
   let report = $state("");
@@ -492,6 +493,21 @@
   async function cancel(id) {
     if (!confirm(`Stop task ${id}? The muse process will be killed.`)) return;
     await act(`/api/tasks/${encodeURIComponent(id)}/cancel`, {});
+  }
+
+  async function reviewTask(id) {
+    busy = "rev";
+    try {
+      const r = await api(`/api/tasks/${encodeURIComponent(id)}/reviewed`, { method: "POST" });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        alert(j.error || "review failed");
+        return;
+      }
+      await load();
+    } finally {
+      busy = "";
+    }
   }
 
   async function runTask(id) {
@@ -1167,18 +1183,22 @@
     <div class="hrow hrow-term">
       <div class="panel">
         <h2>terminal</h2>
-        <div class="termtabs">
-          <button class={termTab === "term" ? "on" : ""} onclick={() => termTab = "term"}>terminal</button>
-          <button class={termTab === "logs" ? "on" : ""} onclick={() => termTab = "logs"}>logs</button>
-          <button class={termTab === "out" ? "on" : ""} onclick={() => termTab = "out"}>output</button>
-        </div>
-        {#if termTab === "term"}
-          <pre class="dump termview">{current && (snap.logs[current.id] || []).length ? (snap.logs[current.id] || []).slice(-30).join("\n") : "waiting for output…"}</pre>
-        {:else if termTab === "logs"}
-          <pre class="dump termview">{report}</pre>
-        {:else}
-          <pre class="dump termview">{history[0]?.note || "—"}</pre>
-        {/if}
+        <Tabs.Root bind:value={termTab} aria-label="terminal views">
+          <Tabs.List variant="line">
+            <Tabs.Trigger value="term">terminal</Tabs.Trigger>
+            <Tabs.Trigger value="logs">logs</Tabs.Trigger>
+            <Tabs.Trigger value="out">output</Tabs.Trigger>
+          </Tabs.List>
+          <Tabs.Content value="term">
+            <pre class="dump termview">{current && (snap.logs[current.id] || []).length ? (snap.logs[current.id] || []).slice(-30).join("\n") : "waiting for output…"}</pre>
+          </Tabs.Content>
+          <Tabs.Content value="logs">
+            <pre class="dump termview">{report}</pre>
+          </Tabs.Content>
+          <Tabs.Content value="out">
+            <pre class="dump termview">{history[0]?.note || "—"}</pre>
+          </Tabs.Content>
+        </Tabs.Root>
       </div>
       <div class="hside">
         <div class="panel">
@@ -1303,6 +1323,11 @@
               <button class="ghost" onclick={() => { detailId = detailId === t.id ? null : t.id; }}>[detail]</button>
               <button class="ghost" onclick={() => openLog(t.id)}>[log]</button>
               <button class="ghost" onclick={() => runTask(t.id)} disabled={!!busy} title="requeue without changing the prompt">[run]</button>
+              {#if !t.reviewedAt}
+                <button class="ghost" onclick={() => reviewTask(t.id)} disabled={!!busy} title="mark this finished task as reviewed">[review]</button>
+              {:else}
+                <span class="v-dim" title="reviewed">✓</span>
+              {/if}
               <button class="ghost danger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</button>
             </span>
           </div>
@@ -1326,11 +1351,12 @@
       <div class="revhead">
         <h2 style="margin:0">workspace_projects · {projects.length}</h2>
       </div>
-      <div class="termtabs" role="tablist" aria-label="project pages">
-        <button class={projTab === "list" ? "on" : ""} onclick={() => { projTab = "list"; }}>project list</button>
-        <button class={projTab === "baru" ? "on" : ""} onclick={() => { projTab = "baru"; projErr = ""; }}>+ new project</button>
-      </div>
-      {#if projTab === "list"}
+      <Tabs.Root bind:value={projTab} aria-label="project pages">
+        <Tabs.List variant="line">
+          <Tabs.Trigger value="list">project list</Tabs.Trigger>
+          <Tabs.Trigger value="baru" onclick={() => { projErr = ""; }}>+ new project</Tabs.Trigger>
+        </Tabs.List>
+        <Tabs.Content value="list">
         {#if !projects.length}
           <div class="pempty">no projects yet — switch to the <button class="ghost" onclick={() => { projTab = "baru"; }}>+ new project</button> tab to create one from prompt, repo, zip, or PRD.</div>
         {:else}
@@ -1359,7 +1385,8 @@
           {/each}
           </div>
         {/if}
-      {:else}
+        </Tabs.Content>
+        <Tabs.Content value="baru">
       <div class="fcard">
         <div class="fsect">1 · basics</div>
         <label for="pn">project name</label>
@@ -1368,32 +1395,37 @@
       </div>
       <div class="fcard">
         <div class="fsect">2 · source</div>
-        <div class="termtabs" role="tablist" aria-label="project source">
-          {#each MODES as m}
-            <button class={projMode === m.id ? "on" : ""} onclick={() => { projMode = m.id; projErr = ""; }}>{m.label}</button>
-          {/each}
-        </div>
-        {#if projMode === "prompt"}
+        <Tabs.Root bind:value={projMode} aria-label="project source">
+          <Tabs.List variant="line">
+            {#each MODES as m}
+              <Tabs.Trigger value={m.id} onclick={() => { projErr = ""; }}>{m.label}</Tabs.Trigger>
+            {/each}
+          </Tabs.List>
+          <Tabs.Content value="prompt">
           <label for="pp">idea / prompt — althea drafts PRD → MVP → features → release (any language — translated to English)</label>
           <textarea id="pp" bind:value={projPrompt} placeholder="build a POS app for a stall: cashier, stock, daily reports"></textarea>
-        {:else if projMode === "repo"}
+          </Tabs.Content>
+          <Tabs.Content value="repo">
           <label for="pru">link repo (https://… / git@…)</label>
           <input id="pru" type="text" bind:value={projRepo} placeholder="https://github.com/aku/repo.git" autocomplete="off" />
           <label for="prp">initial prompt (optional — empty = just clone)</label>
           <input id="prp" type="text" bind:value={projPrompt} placeholder="continue building feature X…" />
           <div class="fhelp">Stack follows the cloned code; categories are auto-detected when a PRD exists.</div>
-        {:else if projMode === "zip"}
+          </Tabs.Content>
+          <Tabs.Content value="zip">
           <label for="pfile">zip file (max {meta?.projectMaxMb ?? 50} MB)</label>
           <input id="pfile" type="file" accept=".zip" onchange={(e) => { projFile = e.currentTarget.files?.[0] || null; }} />
           <label for="pzp">initial prompt (optional — empty = just extract)</label>
           <input id="pzp" type="text" bind:value={projPrompt} placeholder="continue building…" />
           <div class="fhelp">Stack follows the uploaded code; categories are auto-detected when a PRD exists.</div>
-        {:else}
+          </Tabs.Content>
+          <Tabs.Content value="prd">
           <label for="pfile">PRD file (.md / .txt, max 2 MB) — runs MVP straight away</label>
           <input id="pfile" type="file" accept=".md,.markdown,.txt" onchange={(e) => { projFile = e.currentTarget.files?.[0] || null; }} />
           <label for="ppp">goal (optional — default: implement this PRD)</label>
           <input id="ppp" type="text" bind:value={projPrompt} placeholder="focus on…" />
-        {/if}
+          </Tabs.Content>
+        </Tabs.Root>
       </div>
       {#if projMode === "prompt" || projMode === "prd"}
       <div class="fcard">
@@ -1455,7 +1487,8 @@
       </div>
       {#if projErr}<div class="err">✕ {projErr}</div>{/if}
       {#if projMsg}<div class="hint v-ok" style="margin-top:8px">{projMsg}</div>{/if}
-      {/if}
+        </Tabs.Content>
+      </Tabs.Root>
     </div>
 
     {#if revProj}
@@ -1465,12 +1498,13 @@
           <span style="margin-left:auto"><button class="ghost" onclick={closeReview}>[close]</button></span>
         </div>
         {#if revErr}<div class="err">✕ {revErr}</div>{/if}
-        <div class="termtabs" role="tablist" aria-label="review sections">
-          {#each REVTABS as t}
-            <button class={revTab === t.id ? "on" : ""} onclick={() => { revTab = t.id; }}>{t.label}{t.id === "tugas" && revTasks.length ? ` (${revTasks.length})` : ""}{t.id === "files" && revFiles.length ? ` (${revFiles.length})` : ""}</button>
-          {/each}
-        </div>
-        {#if revTab === "tugas"}
+        <Tabs.Root bind:value={revTab} aria-label="review sections">
+          <Tabs.List variant="line">
+            {#each REVTABS as t}
+              <Tabs.Trigger value={t.id}>{t.label}{t.id === "tugas" && revTasks.length ? ` (${revTasks.length})` : ""}{t.id === "files" && revFiles.length ? ` (${revFiles.length})` : ""}</Tabs.Trigger>
+            {/each}
+          </Tabs.List>
+          <Tabs.Content value="tugas">
         {#if revPipe}
           <div class="row">
             <span class="k">pipeline</span>
@@ -1515,6 +1549,11 @@
                 <button class="ghost" onclick={() => { fTarget = t.id; }}>[follow up]</button>
                 {#if t.status === "done" || t.status === "failed"}
                   <button class="ghost" onclick={() => runTask(t.id)} disabled={!!busy} title="requeue without changing the prompt">[run]</button>
+                {/if}
+                {#if t.status === "done" && !t.reviewedAt}
+                  <button class="ghost" onclick={() => reviewTask(t.id)} disabled={!!busy} title="mark this finished task as reviewed">[review]</button>
+                {:else if t.status === "done"}
+                  <span class="v-dim" title="reviewed">✓</span>
                 {/if}
                 <button class="ghost danger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</button>
               </span>
@@ -1563,8 +1602,8 @@
           <input id="ins" type="text" bind:value={instructText} placeholder="e.g. add a per-item discount feature" />
           <button onclick={instruct} disabled={busy === "ins" || !instructText.trim()} style="white-space:nowrap">[run]</button>
         </div>
-        {/if}
-        {#if revTab === "mcp"}
+          </Tabs.Content>
+          <Tabs.Content value="mcp">
         <h2>mcp_server</h2>
         {#if !mcpInfo}
           <span class="v-dim">loading…</span>
@@ -1592,8 +1631,8 @@
           {/each}
           <div class="hint">Active MCPs are injected into the muse CLI settings.json while this project's tasks run.</div>
         {/if}
-        {/if}
-        {#if revTab === "preview"}
+          </Tabs.Content>
+          <Tabs.Content value="preview">
         <h2>preview_aplikasi</h2>
         {#if !pvInfo}
           <span class="v-dim">loading…</span>
@@ -1675,8 +1714,8 @@
             {/if}
           {/if}
         {/if}
-        {/if}
-        {#if revTab === "diff"}
+          </Tabs.Content>
+          <Tabs.Content value="diff">
         {#if revDiff}
           {#if !revDiff.repo}
             <div class="hint">Not a git repo — no diff available. Browse the files below.</div>
@@ -1690,8 +1729,8 @@
         {:else}
           <span class="v-dim">loading diff…</span>
         {/if}
-        {/if}
-        {#if revTab === "files"}
+          </Tabs.Content>
+          <Tabs.Content value="files">
         <h2>files ({revFiles.length})</h2>
         {#snippet treenode(node, depth)}
           {#each sortedNames(node.dirs) as d}
@@ -1727,7 +1766,8 @@
             {/if}
           </div>
         </div>
-        {/if}
+          </Tabs.Content>
+        </Tabs.Root>
       </div>
     {/if}
 

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwindcss from "@tailwindcss/vite";
@@ -9,6 +10,11 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   root: "web",
   plugins: [tailwindcss(), svelte()],
+  resolve: {
+    alias: {
+      $lib: fileURLToPath(new URL("./web/src/lib", import.meta.url)),
+    },
+  },
   server: {
     port: 5173,
     // diakses publik via Caddy sebagai https://althea.test

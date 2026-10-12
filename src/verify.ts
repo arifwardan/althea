@@ -23,6 +23,43 @@ export interface VerifyResult {
   steps: VerifyStep[];
 }
 
+const DOCS_EXT = [".md", ".markdown", ".txt", ".rst", ".adoc"];
+
+/** Kumpulkan path file yang berubah dari teks diff/stat git. */
+export function changedFiles(diff: string): string[] {
+  const out = new Set<string>();
+  for (const line of String(diff || "").split("\n")) {
+    const dg = line.match(/^diff --git a\/(.+?) b\/(.+?)\s*$/);
+    if (dg) {
+      const f = dg[1].trim();
+      if (f && f !== "/dev/null") out.add(f);
+      continue;
+    }
+    if (/files? changed/.test(line)) continue; // baris ringkasan stat, bukan file
+    const st = line.match(/^\s*(\S(?:.*\S)?)\s+\|\s+\d+/);
+    if (st) {
+      const f = st[1].trim();
+      if (f) out.add(f);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * true = diff tak menyentuh file kode (kosong, atau hanya dokumen) → gate
+ * check/test/build tak relevan (pernah: tugas update PRD gagal melulu karena
+ * build web yang memang rusak, padahal tujuannya tercapai).
+ * Diff yang tak bisa diparsing (bukan repo git dsb.) → false (tetap verifikasi).
+ */
+export function isDocsOnlyDiff(diff: string): boolean {
+  const t = String(diff || "").trim();
+  if (!t) return true;
+  if (/^\(no project|^\(not a git repo/.test(t)) return false;
+  const files = changedFiles(t);
+  if (!files.length) return false;
+  return files.every((f) => DOCS_EXT.some((ext) => f.toLowerCase().endsWith(ext)));
+}
+
 /** Daftar skrip di package.json cwd; null bila tanpa package.json. */
 export function pkgScripts(cwd: string): string[] | null {
   const f = join(cwd, "package.json");
@@ -76,7 +113,7 @@ export async function runVerifyGates(
       return {
         ok: false,
         ran: steps.filter((x) => !x.skipped).length,
-        summary: `verifier failed at "${tag} ${s}":\n${output}`.slice(0, 2000),
+        summary: `verifier failed at "${tag} ${s}" (exit ${r.code}):\n${output || "(no output)"}`.slice(0, 2000),
         steps,
       };
     }

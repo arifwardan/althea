@@ -33,6 +33,7 @@ export interface StackTask {
   usage?: Usage; // akumulasi karakter + estimasi token tugas ini
   status: TaskStatus;
   attempts: number;
+  reviewedAt: string | null; // kapan admin me-review selesai (null = menunggu review)
   note?: string;
   createdAt: string;
   updatedAt: string;
@@ -160,6 +161,17 @@ export function loadState(path: string): AltheaState {
       s.limits.timeoutSeconds = 0;
     }
     if (!Array.isArray(s.events)) s.events = [];
+    // Migrasi: tugas lama belum punya field reviewedAt — yang sudah done
+    // dianggap sudah di-review (tanpa notif susulan). null yang sudah ada
+    // (menunggu review) wajib dipertahankan, bukan ditimpa.
+    for (const t of s.stack) {
+      const rec = t as unknown as Record<string, unknown>;
+      if (!("reviewedAt" in rec)) {
+        (t as StackTask).reviewedAt = t.status === "done" ? t.updatedAt : null;
+      } else if (typeof rec.reviewedAt !== "string" && rec.reviewedAt !== null) {
+        (t as StackTask).reviewedAt = null;
+      }
+    }
     // Migrasi: cooldown kuota dihapus — tugas lama berstatus waiting_quota
     // langsung antre lagi (tak ada penahanan), sisa field kuota dibuang.
     for (const t of s.stack) {

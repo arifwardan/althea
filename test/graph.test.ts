@@ -46,6 +46,38 @@ describe("runGraphTask", () => {
     assert.deepEqual(byNode(calls), { plan: 1, implement: 1, review: 1 });
     assert.equal(t.graph?.plan, "1. a");
   });
+  it("dengan cwd: prompt plan+implement dikungkung ke folder itu", async () => {
+    const t = freshTask();
+    const { run, calls } = mock((p) =>
+      ok(p.startsWith("You are a planner") ? "1. a" : p.startsWith("You are an implementer") ? "selesai" : "APPROVED"));
+    const g = await runGraphTask({ task: t, cwd: "/ws/sipandu", maxRounds: 3, run });
+    assert.equal(g.approved, true);
+    const impl = calls.find((p) => p.startsWith("You are an implementer")) || "";
+    assert.match(impl, /\/ws\/sipandu/);
+    assert.match(impl, /sibling project folders/);
+  });
+  it("tanpa cwd: tanpa boundary", async () => {
+    const t = freshTask();
+    const { run, calls } = mock((p) =>
+      ok(p.startsWith("You are a planner") ? "1. a" : p.startsWith("You are an implementer") ? "selesai" : "APPROVED"));
+    const g = await runGraphTask({ task: t, maxRounds: 3, run });
+    assert.equal(g.approved, true);
+    for (const p of calls) assert.doesNotMatch(p, /WORKING DIRECTORY/);
+  });
+  it("diff hanya dokumen → verify dilewati, reviewer tetap menilai", async () => {
+    const t = freshTask();
+    const { run, calls } = mock((p) =>
+      ok(p.startsWith("You are a planner") ? "1. a" : p.startsWith("You are an implementer") ? "selesai" : "APPROVED"));
+    const docsDiff = " PRD.md | 2 +-\n 1 file changed\n\ndiff --git a/PRD.md b/PRD.md\n++x";
+    const g = await runGraphTask({
+      task: t, cwd: "/ws/sipandu", maxRounds: 3, run,
+      verify: { scripts: ["build"], timeoutMs: 1000 },
+      getDiff: async () => docsDiff,
+    });
+    assert.equal(g.approved, true);
+    assert.match(g.outputs.join("\n"), /docs-only change/);
+    assert.deepEqual(byNode(calls), { plan: 1, implement: 1, review: 1 });
+  });
 
   it("FEEDBACK 2x lalu APPROVED → 3x implement", async () => {
     const t = freshTask();

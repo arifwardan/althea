@@ -24,6 +24,7 @@ export function pushTask(
     ...(opts?.askOnly ? { askOnly: true as const } : {}),
     status: "queued",
     attempts: 0,
+    reviewedAt: null,
     note,
     createdAt: now,
     updatedAt: now,
@@ -81,8 +82,21 @@ export function markDone(s: AltheaState, id: string, note = ""): void {
   if (!t) return;
   t.status = "done";
   t.updatedAt = new Date().toISOString();
+  t.reviewedAt = null; // selesai baru → menunggu review admin
   if (note) t.note = note;
   logEvent(s, `done ${id}`);
+}
+
+/**
+ * Tandai selesai sudah di-review admin (centang). Hanya untuk status done.
+ * Non-blokir: AI tetap lanjut ke tugas berikut; ini murni checklist.
+ */
+export function markReviewed(s: AltheaState, id: string): boolean {
+  const t = s.stack.find((x) => x.id === id);
+  if (!t || t.status !== "done" || t.reviewedAt) return false;
+  t.reviewedAt = new Date().toISOString();
+  logEvent(s, `reviewed ${id}`);
+  return true;
 }
 
 export function markFailed(s: AltheaState, id: string, note = ""): void {
@@ -198,6 +212,23 @@ export function parseIzinRequest(output: string): string | null {
   if (!m) return null;
   const q = m[1].replace(/\*+$/, "").trim();
   return q ? q.slice(0, 500) : null;
+}
+
+/**
+ * Kungkung prompt ke satu folder kerja (project): AI dilarang keluar —
+ * dilarang me-listing/membaca/mengubah apa pun di luarnya, terutama folder
+ * project tetangga. Tanpa dir (tugas tanpa project) prompt tak diubah.
+ */
+export function boundToDir(prompt: string, dir?: string): string {
+  const d = (dir || "").trim();
+  if (!d) return prompt;
+  return [
+    `<WORKING DIRECTORY (absolute boundary — do not leave it):>\n${d}`,
+    "Rules: do ALL file listings, reads, writes, and deletions INSIDE this directory only.",
+    "NEVER list, read, or change anything outside it — especially sibling project folders.",
+    "If the target is not found inside, STOP and report instead of searching elsewhere.",
+    `<TASK>\n${prompt}`,
+  ].join("\n");
 }
 
 /** Batalkan tugas aktif (queued/running/waiting_approval) → failed. */

@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { config } from "./config.js";
 import { loadState, saveState, logEvent, appendLog, appendActivity } from "./state.js";
 import { addRun, emptyUsage } from "./tokens.js";
-import { peek, markDone, markFailed, noteTimeout, requestApproval, resolveApproval, buildAskPrompt, shouldApplyRunResult, parseIzinRequest } from "./workflow.js";
+import { peek, markDone, markFailed, noteTimeout, requestApproval, resolveApproval, buildAskPrompt, shouldApplyRunResult, parseIzinRequest, boundToDir, markReviewed } from "./workflow.js";
 import { processEscalations } from "./escalation.js";
 import { isSleeping, forceWake } from "./sleeper.js";
 import { runClaude, brainSummary, effectiveBrain, effectiveTimeoutSeconds } from "./claude.js";
@@ -166,7 +166,9 @@ async function tick(): Promise<void> {
   };
   try {
     const askPrompt = top.askOnly ? buildAskPrompt(top.prompt) : top.prompt;
-    const r = config.graphEnabled ? await runGraphMode() : await runClaude(askPrompt, cwd, pushLine, pushActivity);
+    // Mode single-shot: kungkung juga (graph mode sudah dikungkung di runGraphTask).
+    const shotPrompt = cwd ? boundToDir(askPrompt, cwd) : askPrompt;
+    const r = config.graphEnabled ? await runGraphMode() : await runClaude(shotPrompt, cwd, pushLine, pushActivity);
     // Catat pemakaian (juga untuk run yang dibatalkan/limit — token tetap terpakai).
     const charsIn = config.graphEnabled ? graphIn : [...top.prompt].length;
     const charsOut = [...r.output].length;
@@ -218,6 +220,14 @@ async function tick(): Promise<void> {
         markDone(state, top.id, (graphNote || r.output).slice(0, 1000));
         if (top.askOnly) {
           await notifyAdmins(`Answer\n"${top.title}"\n\n${(graphNote || r.output).slice(0, 3500)}`);
+          markReviewed(state, top.id); // tanya-jawab tak perlu review checklist
+        } else {
+          // Non-blokir: minta review selesai (Tele + dashboard checklist),
+          // AI tetap lanjut ke tugas berikut.
+          await notifyAdmins(
+            `Task complete — please review\n"${top.title}" (${top.id})${top.project ? ` @${top.project}` : ""}\n${(graphNote || r.output).slice(0, 500)}`,
+            { inline_keyboard: [[{ text: "✓ Reviewed", callback_data: `seen:${top.id}` }]] },
+          );
         }
         // Tugas fase pipeline → dorong fase berikut (atau tamatkan pipeline).
         const adv = advancePipeline(state, top, r.output);

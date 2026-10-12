@@ -39,6 +39,8 @@ Dashboard memakai **Svelte 5 + Vite** (build statis ±100 KB, tanpa framework ru
    mematikan proses Muse detik itu juga (SIGTERM → SIGKILL).
    Tombol **[correct]** di panel running_task: menghentikan run, menempelkan
    arahan admin ke prompt, lalu mengantre ulang tugas yang sama.
+   Setiap tugas selesai → notif "task complete, please review" (Telegram +
+   tombol ✓, AI tetap lanjut) dan checklist [review] di riwayat.
 6. **Log live + review code** — output Muse mengalir ke dashboard (SSE, tersimpan
    200 baris/tugas); panel review menampilkan `git diff` project, pohon file,
    dan isi file untuk diperiksa.

@@ -2,8 +2,11 @@
 // Jalankan: npm test (tsx + node:test, tanpa dependensi baru).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { defaultState, appendLog, appendActivity } from "../src/state.js";
-import { pushTask, peek, markDone, requestApproval, resolveApproval, cancelTask, correctTask, shouldApplyRunResult, deleteTask, requeueTask, parseIzinRequest, noteTimeout, stackSummary } from "../src/workflow.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { defaultState, loadState, appendLog, appendActivity } from "../src/state.js";
+import { pushTask, peek, markDone, requestApproval, resolveApproval, cancelTask, correctTask, shouldApplyRunResult, deleteTask, requeueTask, parseIzinRequest, boundToDir, markReviewed, noteTimeout, stackSummary } from "../src/workflow.js";
 import { killRunning } from "../src/claude.js";
 import { detectLimit, parseRetryAfter, limitHit } from "../src/claude.js";
 import { goSleep, forceWake, isSleeping } from "../src/sleeper.js";
@@ -202,6 +205,67 @@ describe("parseIzinRequest (approval prompt toleran)", () => {
     assert.equal(parseIzinRequest("IZIN:"), null);
     assert.equal(parseIzinRequest(""), null);
     assert.equal(parseIzinRequest("perizinan sudah diurus admin"), null);
+  });
+});
+
+describe("boundToDir (kungkung AI di folder project)", () => {
+  it("dengan dir: boundary + aturan + prompt asli", () => {
+    const out = boundToDir("hapus folder db", "/ws/sipandu");
+    assert.match(out, /\/ws\/sipandu/);
+    assert.match(out, /do not leave it/);
+    assert.match(out, /sibling project folders/);
+    assert.match(out, /STOP and report/);
+    assert.match(out, /hapus folder db/);
+  });
+  it("tanpa dir: prompt tak diubah", () => {
+    assert.equal(boundToDir("p", ""), "p");
+    assert.equal(boundToDir("p"), "p");
+    assert.equal(boundToDir("p", undefined), "p");
+  });
+});
+
+describe("markReviewed (checklist selesai)", () => {
+  it("done baru → belum review; centang → reviewed", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    markDone(s, t.id);
+    assert.equal(t.reviewedAt, null);
+    assert.equal(markReviewed(s, t.id), true);
+    assert.ok(typeof t.reviewedAt === "string");
+    assert.equal(markReviewed(s, t.id), false); // dobel centang ditolak
+  });
+  it("bukan done / tak dikenal → false", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    assert.equal(markReviewed(s, t.id), false); // masih queued
+    markDone(s, t.id);
+    assert.equal(markReviewed(s, t.id), true);
+    t.status = "failed";
+    assert.equal(markReviewed(s, t.id), false);
+    assert.equal(markReviewed(s, "t_takada"), false);
+  });
+  it("migrasi: done lama dianggap reviewed, lainnya null", () => {
+    const s = defaultState();
+    const d = pushTask(s, "D", "p");
+    markDone(s, d.id);
+    const raw = JSON.parse(JSON.stringify(s));
+    delete raw.stack[0].reviewedAt;
+    const dir = mkdtempSync(join(tmpdir(), "althea-review-"));
+    const p = join(dir, "state.json");
+    writeFileSync(p, JSON.stringify(raw));
+    const s2 = loadState(p);
+    assert.equal(s2.stack[0].reviewedAt, s2.stack[0].updatedAt);
+  });
+  it("migrasi: null (menunggu review) bertahan saat reload", () => {
+    const s = defaultState();
+    const d = pushTask(s, "D", "p");
+    markDone(s, d.id); // reviewedAt null = menunggu review
+    const dir = mkdtempSync(join(tmpdir(), "althea-review-"));
+    const p = join(dir, "state.json");
+    writeFileSync(p, JSON.stringify(s));
+    const s2 = loadState(p);
+    assert.equal(s2.stack[0].reviewedAt, null);
+    assert.equal(markReviewed(s2, s2.stack[0].id), true);
   });
 });
 

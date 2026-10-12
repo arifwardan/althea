@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { pkgScripts, runVerifyGates, realRunCmd } from "../src/verify.js";
+import { pkgScripts, runVerifyGates, realRunCmd, changedFiles, isDocsOnlyDiff } from "../src/verify.js";
 import { config, normalizeJsRunner } from "../src/config.js";
 
 function tmpDir(): string {
@@ -66,6 +66,35 @@ describe("runVerifyGates (runner palsu)", () => {
     } finally {
       rmSync(d, { recursive: true, force: true });
     }
+  });
+});
+
+describe("isDocsOnlyDiff", () => {
+  const mdDiff = [
+    " PRD.md | 2 +-",
+    " 1 file changed, 1 insertion(+), 1 deletion(-)",
+    "",
+    "diff --git a/PRD.md b/PRD.md",
+    "+| Monorepo | Turborepo |",
+  ].join("\n");
+  const codeDiff = [
+    " apps/web/postcss.config.js | 3 ++-",
+    " PRD.md | 2 +-",
+    " 2 files changed, 3 insertions(+), 2 deletions(-)",
+    "",
+    "diff --git a/apps/web/postcss.config.js b/apps/web/postcss.config.js",
+  ].join("\n");
+  it("hanya dokumen → true; campur kode → false", () => {
+    assert.deepEqual(changedFiles(mdDiff), ["PRD.md"]);
+    assert.equal(isDocsOnlyDiff(mdDiff), true);
+    assert.equal(isDocsOnlyDiff(codeDiff), false);
+  });
+  it("kosong → true (tak ada yang digate); tak terparsing → false (tetap verifikasi)", () => {
+    assert.equal(isDocsOnlyDiff(""), true);
+    assert.equal(isDocsOnlyDiff("   \n  "), true);
+    assert.equal(isDocsOnlyDiff("(not a git repo — review from the file list)"), false);
+    assert.equal(isDocsOnlyDiff("(no project — review from text output)"), false);
+    assert.equal(isDocsOnlyDiff("some random output without filenames"), false);
   });
 });
 
