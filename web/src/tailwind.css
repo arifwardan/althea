@@ -12,6 +12,8 @@
   --color-foreground: #dcebe3;
   --color-card: #0a0f0b;
   --color-card-foreground: #dcebe3;
+  /* permukaan card bersarang (card di dalam card) — setara --ink legacy */
+  --color-inset: #020403;
   --color-popover: #070c09;
   --color-popover-foreground: #dcebe3;
   --color-primary: #2fe69b;

@@ -4,6 +4,7 @@
   import { buildFileTree, sortedNames } from "./tree.ts";
   import { Select, Progress } from "bits-ui";
   import * as Tabs from "./lib/components/tabs/index.ts";
+  import * as Card from "./lib/components/card/index.ts";
   import Button from "./lib/components/button.svelte";
   import type {
     AltheaState,
@@ -28,12 +29,6 @@
   // tombol di atas, konten di bawah. Styling-nya ada di file component tersebut.
   // Button = component lokal (lib/components/button.svelte) — pakai
   // <Button variant="ghost|danger|cta|pick|…">.
-  const cCard = "rounded-lg border border-border bg-card text-card-foreground";
-  const cCardHeader = "flex flex-col gap-1 px-4 pt-3";
-  const cCardTitle = "text-sm leading-none font-semibold tracking-tight";
-  const cCardDesc = "text-xs text-muted-foreground";
-  const cCardContent = "px-4 py-3";
-  const cCardFooter = "flex items-center gap-2 border-t border-border px-4 py-2.5";
   const cInput = "flex h-8 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50";
   const cBadgeBase = "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap transition-colors";
   const cBadgeSuccess = `${cBadgeBase} border-success bg-success/25 text-success-foreground`;
@@ -1421,7 +1416,7 @@
           {#each projects as p (p.name)}
             {@const badge = pipeBadge(p)}
             {@const cats = catBadges(p)}
-            <div class="pcard">
+            <Card.Root variant="nested" class="flex flex-col gap-2 min-w-0 px-3 py-2.5 transition-colors duration-150 hover:border-border">
               <div class="pcard-head">
                 <span class="pgrow"><span class="pname">{p.name}</span></span>
                 <span class="pill {badge.cls}" title={badge.title}><span class="pdot"></span>{badge.text}</span>
@@ -1438,19 +1433,19 @@
                 <button onclick={() => openReview(p.name)}>[review]</button>
                 <Button variant="danger" onclick={() => delProject(p.name)} disabled={!!busy}>[delete]</Button>
               </div>
-            </div>
+            </Card.Root>
           {/each}
           </div>
         {/if}
         </Tabs.Content>
         <Tabs.Content value="baru">
-      <div class="fcard">
+      <Card.Root variant="nested" class="mt-3 px-4 py-3.5">
         <div class="fsect">1 · basics</div>
         <label for="pn">project name</label>
         <input id="pn" class="bigname" type="text" bind:value={projName} placeholder="e.g. pos-kasir — lowercase, no spaces" autocomplete="off" />
         <div class="fhelp">The name becomes the folder in workspace/{#if projMode === "prompt" || projMode === "prd"} — and the .test address (name.test) once its dev server runs on the preview port{/if}.</div>
-      </div>
-      <div class="fcard">
+      </Card.Root>
+      <Card.Root variant="nested" class="mt-3 px-4 py-3.5">
         <div class="fsect">2 · source</div>
         <Tabs.Root bind:value={projMode} aria-label="project source">
           <Tabs.List>
@@ -1483,9 +1478,9 @@
           <input id="ppp" type="text" bind:value={projPrompt} placeholder="focus on…" />
           </Tabs.Content>
         </Tabs.Root>
-      </div>
+      </Card.Root>
       {#if projMode === "prompt" || projMode === "prd"}
-      <div class="fcard">
+      <Card.Root variant="nested" class="mt-3 px-4 py-3.5">
         <div class="fsect">3 · tech_stack</div>
         <div class="fhelp">Click to pick per layer. Laravel backend = preview via lerd (name.test); other backends preview via their own dev server.</div>
         {#if meta?.stackOptions}
@@ -1509,8 +1504,8 @@
         {#if projStack.be !== "laravel"}
           <div class="hint" style="margin-top:8px">non-Laravel backend — preview runs the project's dev server (no lerd); name.test opens it when the dev server binds the preview port.</div>
         {/if}
-      </div>
-      <div class="fcard">
+      </Card.Root>
+      <Card.Root variant="nested" class="mt-3 px-4 py-3.5">
         <div class="fsect">4 · app_categories</div>
         <div class="fhelp">Several allowed per dimension. Emptied dimensions are guessed by AI from the PRD.</div>
         {#if meta?.categoryTaxonomy}
@@ -1530,7 +1525,7 @@
         {:else}
           <div class="hint">backend is still the old version — restart the backend then reload this page.</div>
         {/if}
-      </div>
+      </Card.Root>
       {/if}
       <div class="btnrow">
         <Button variant="cta"
@@ -1830,12 +1825,12 @@
     {:else}
     <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
       <div class="flex min-w-0 flex-col gap-4">
-        <div class={cCard}>
-          <div class={cCardHeader}>
-            <h3 class={cCardTitle}>system_status</h3>
-            <p class={cCardDesc}>read-only runtime state</p>
-          </div>
-          <div class={cCardContent}>
+        <Card.Root>
+          <Card.Header>
+            <Card.Title>system_status</Card.Title>
+            <Card.Description>read-only runtime state</Card.Description>
+          </Card.Header>
+          <Card.Content>
             <dl class="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
               <div class="flex items-center justify-between gap-3 border-b border-border py-1.5">
                 <dt class="text-xs text-muted-foreground">engine</dt>
@@ -1861,15 +1856,15 @@
                 <dd class="text-sm">{tasks.length} active · {doneCount} done · {failCount} failed</dd>
               </div>
             </dl>
-          </div>
-        </div>
+          </Card.Content>
+        </Card.Root>
 
-        <div class={cCard}>
-          <div class={cCardHeader}>
-            <h3 class={cCardTitle}>configuration</h3>
-            <p class={cCardDesc}>applies to the next run{#if current?.status === "running"} — brain is working now{/if}</p>
-          </div>
-          <div class={cCardContent}>
+        <Card.Root>
+          <Card.Header>
+            <Card.Title>configuration</Card.Title>
+            <Card.Description>applies to the next run{#if current?.status === "running"} — brain is working now{/if}</Card.Description>
+          </Card.Header>
+          <Card.Content>
             <div class="border-b border-border pb-4">
               <div class="mb-2 text-xs font-medium">model_control</div>
               <div class="mb-3 truncate text-xs text-muted-foreground">{brain ? `${brain.agent} (${brain.agentSource}) · ${brain.bin}${brain.subcommand ? " " + brain.subcommand : " -p"}` : "…"} · {brain?.model || "default CLI"} ({brain?.modelSource || "…"}) · {brain?.effort || "default CLI"} ({brain?.effortSource || "…"})</div>
@@ -1972,21 +1967,21 @@
               </div>
             </div>
           </div>
-          <div class={cCardFooter}>
+          <Card.Footer>
             <Button variant="default" onclick={saveBrain} disabled={busy === "brain"}>save brain</Button>
             <Button variant="default" onclick={saveLimits} disabled={busy === "limits"}>save timeout</Button>
             {#if brainMsg}<span class="text-xs text-muted-foreground">{brainMsg}</span>{/if}
             {#if limitsMsg}<span class="text-xs text-muted-foreground">{limitsMsg}</span>{/if}
-          </div>
-        </div>
+          </Card.Footer>
+        </Card.Root>
       </div>
 
-      <div class={`${cCard} h-fit`}>
-        <div class={cCardHeader}>
-          <h3 class={cCardTitle}>laptop</h3>
-          <p class={cCardDesc}>resource_monitoring</p>
-        </div>
-        <div class={cCardContent}>
+      <Card.Root class="h-fit">
+        <Card.Header>
+          <Card.Title>laptop</Card.Title>
+          <Card.Description>resource_monitoring</Card.Description>
+        </Card.Header>
+        <Card.Content>
           {#if metrics}
             <div class="mb-1 flex items-center justify-between text-xs">
               <span class="text-muted-foreground">cpu</span><span class="font-mono text-sm">{metrics.cpuPercent}%</span>
@@ -2030,8 +2025,8 @@
           {:else}
             <span class="text-xs text-muted-foreground">loading metrics…</span>
           {/if}
-        </div>
-      </div>
+        </Card.Content>
+      </Card.Root>
     </div>
 
     <div class="grid" style="margin-top:12px">
