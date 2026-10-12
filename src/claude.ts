@@ -1,9 +1,8 @@
-// Pembungkus Muse CLI: eksekusi prompt, DETEKSI LIMIT TOKEN,
-// dan jadwalkan RESUME OTOMATIS tiap reset ±5 jam tanpa prompt ulang.
+// Pembungkus Muse CLI: eksekusi prompt + DETEKSI LIMIT TOKEN.
+// Tanpa cooldown: limit langsung menggagalkan tugas (admin ganti
+// model/provider lalu jalankan ulang) — tak ada tunggu otomatis.
 import { spawn, execFileSync } from "node:child_process";
-import { config, resetMs } from "./config.js";
-import type { AltheaState } from "./state.js";
-import { logEvent } from "./state.js";
+import { config, detectBrainAgent } from "./config.js";
 import { createExecStream, type StreamActivity } from "./execstream.js";
 import { startFileWatch } from "./projects.js";
 
@@ -53,7 +52,20 @@ export function normalizeModel(v: unknown): string {
   return String(v ?? "").trim().slice(0, 120);
 }
 
-export interface BrainOverride { model: string; effort: string; }
+/** Agen coding valid atau "" = ikut env/tebakan biner. Nilai asing → "". */
+export function normalizeAgent(v: unknown): string {
+  const t = String(v ?? "").trim().toLowerCase();
+  return t === "muse" || t === "opencode" ? t : "";
+}
+
+/** Perintah biner otak, di-trim, maks 200 char. "" = ikut env. */
+export function normalizeBin(v: unknown): string {
+  return String(v ?? "").trim().slice(0, 200);
+}
+
+export interface BrainOverride {
+  model: string; effort: string; bin?: string; agent?: string; subcommand?: string;
+}
 export type BrainSource = "dashboard" | "env" | "cli-default";
 
 export interface EffectiveBrain {
@@ -62,6 +74,8 @@ export interface EffectiveBrain {
   subcommand: string; // "exec" | "run" | "" (gaya lama -p)
   model: string;
   effort: string;
+  binSource: BrainSource;
+  agentSource: BrainSource;
   modelSource: BrainSource;
   effortSource: BrainSource;
 }
@@ -71,8 +85,14 @@ export interface BrainEnv { bin: string; agent: string; subcommand: string; mode
 // Override modul: diset dari state saat boot + tiap PUT /api/brain.
 let override: BrainOverride = { model: "", effort: "" };
 
-export function setBrainOverride(o: { model?: unknown; effort?: unknown }): void {
-  override = { model: normalizeModel(o.model), effort: normalizeEffort(o.effort) };
+export function setBrainOverride(o: { model?: unknown; effort?: unknown; bin?: unknown; agent?: unknown; subcommand?: unknown }): void {
+  override = {
+    model: normalizeModel(o.model),
+    effort: normalizeEffort(o.effort),
+    bin: normalizeBin(o.bin),
+    agent: normalizeAgent(o.agent),
+    subcommand: String(o.subcommand ?? "").trim().slice(0, 120),
+  };
 }
 
 const defaultEnv = (): BrainEnv => ({
@@ -87,12 +107,21 @@ const defaultEnv = (): BrainEnv => ({
 export function effectiveBrain(o: BrainOverride = override, env: BrainEnv = defaultEnv()): EffectiveBrain {
   const model = o.model || env.model;
   const effort = o.effort || env.effort;
+  // Pilihan agen dari dashboard (bin/agent) mengalahkan env; bin kustom tanpa
+  // agen eksplisit ditebak dari namanya; subcommand mengikuti agen terpilih
+  // (exec/run) kecuali env memaksa gaya lama -p dan dashboard tak campur tangan.
+  const bin = o.bin || env.bin;
+  const agent = o.agent || (o.bin ? detectBrainAgent(o.bin, "") : env.agent);
+  const dashTouched = !!(o.bin || o.agent);
+  const subcommand = o.subcommand || (dashTouched ? (agent === "opencode" ? "run" : "exec") : env.subcommand);
   return {
-    bin: env.bin,
-    agent: env.agent,
-    subcommand: env.subcommand,
+    bin,
+    agent,
+    subcommand,
     model,
     effort,
+    binSource: o.bin ? "dashboard" : "env",
+    agentSource: dashTouched ? "dashboard" : "env",
     modelSource: o.model ? "dashboard" : env.model ? "env" : "cli-default",
     effortSource: o.effort ? "dashboard" : env.effort ? "env" : "cli-default",
   };
@@ -304,13 +333,13 @@ export function detectLimit(text: string): boolean {
 }
 
 /**
- * true = run gagal karena LIMIT KUOTA provider (FR-4).
+ * true = run gagal karena LIMIT KUOTA provider.
  * Sinyal sah = error ASLI dari CLI/API (baris non-JSON stdout/stderr,
  * event error opencode, task.lifecycle.failed muse) — selalu diperiksa.
  * Jawaban AI (transkrip) hanya diperiksa bila run gagal (exit ≠ 0):
- * prosa normal yang menyebut "quota"/"limit" saat bekerja BUKAN limit,
- * sehingga tak memicu cooldown. Admin tinggal ganti model/provider lain
- * yang belum kena limit, lalu resume.
+ * prosa normal yang menyebut "quota"/"limit" saat bekerja BUKAN limit.
+ * Limit langsung menggagalkan tugas (tanpa cooldown); admin tinggal ganti
+ * model/provider lain yang belum kena limit, lalu jalankan ulang.
  */
 export function limitHit(exitCode: number | null, errorText: string, transcript: string): boolean {
   if (detectLimit(errorText)) return true;
@@ -435,23 +464,4 @@ export function runClaude(
   });
 }
 
-/** Masuk mode cooldown limit: notif + catat kapan resume otomatis. */
-export function enterLimitCooldown(s: AltheaState, retryAfterMs: number | null): string {
-  const wait = retryAfterMs ?? resetMs(); // default: reset langganan ±5 jam
-  const until = new Date(Date.now() + wait).toISOString();
-  s.limitCooldownUntil = until;
-  logEvent(s, `token limit → cooldown until ${until}`);
-  return until;
-}
 
-/** true = masih cooldown; false = sudah tiba waktunya resume (sekaligus reset flag). */
-export function limitDue(s: AltheaState, now = new Date()): boolean {
-  if (!s.limitCooldownUntil) return true;
-  if (new Date(s.limitCooldownUntil).getTime() <= now.getTime()) {
-    s.limitCooldownUntil = null;
-    s.lastReset = now.toISOString();
-    logEvent(s, "reset reached → auto-resume without re-prompting");
-    return true;
-  }
-  return false;
-}

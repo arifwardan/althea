@@ -21,6 +21,13 @@
   let brainModel = $state("");
   let brainEffort = $state("");
   let brainProvider = $state("");
+  let brainAgent = $state("");
+  let brainBin = $state("");
+  const agentOptions = [
+    { value: "", label: "— env default —" },
+    { value: "muse", label: "muse (Muse Code)" },
+    { value: "opencode", label: "opencode" },
+  ];
 
   // Opsi select model: dari katalog backend per agen (opencode = provider/model
   // terautentikasi, muse = daftar terkurasi). Nilai tersimpan yang tak ada di
@@ -47,6 +54,21 @@
   $effect(() => {
     const p = brainProvider;
     if (p && brainModel && !brainModel.startsWith(p + "/")) brainModel = "";
+  });
+  // Ganti agen → isi biner bawaannya bila kolom biner masih kosong.
+  $effect(() => {
+    const a = brainAgent;
+    if ((a === "muse" || a === "opencode") && !brainBin.trim()) {
+      brainBin = a === "opencode" ? "opencode" : "muse";
+    }
+  });
+  // Kotak koreksi basi (tugas selesai/berganti) → tutup sendiri.
+  $effect(() => {
+    if (cTarget && (!current || current.id !== cTarget)) {
+      cTarget = null;
+      cText = "";
+      cErr = "";
+    }
   });
   let brainMsg = $state("");
   let limits = $state(null);
@@ -160,6 +182,9 @@
   let pvFrameKey = $state(0);
   let showPvLog = $state(false);
   let fTarget = $state(null); // id tugas untuk tindak lanjut
+  let cTarget = $state(null); // id tugas yang dikoreksi mid-run
+  let cText = $state("");
+  let cErr = $state("");
   let fText = $state("");
   let instructText = $state("");
   let showNote = $state(null); // id tugas yang hasilnya dibuka
@@ -212,12 +237,18 @@
       brain?.agent === "opencode" && brainModel.includes("/") ? brainModel.split("/")[0] : "";
   }
 
+  function syncBrainFields() {
+    brainModel = brain.model || "";
+    brainEffort = brain.effort || "";
+    brainAgent = brain.agentSource === "dashboard" ? brain.agent : "";
+    brainBin = brain.binSource === "dashboard" ? brain.bin : "";
+    syncProviderFromModel();
+  }
+
   async function loadBrain() {
     try {
       brain = await (await api("/api/brain")).json();
-      brainModel = brain.model || "";
-      brainEffort = brain.effort || "";
-      syncProviderFromModel();
+      syncBrainFields();
     } catch {
       /* authed=false ditangani api() */
     }
@@ -261,17 +292,18 @@
     try {
       const r = await api("/api/brain", {
         method: "PUT",
-        body: JSON.stringify({ model: brainModel, effort: brainEffort }),
+        body: JSON.stringify({ model: brainModel, effort: brainEffort, agent: brainAgent, bin: brainBin }),
       });
       const j = await r.json();
       if (!r.ok) {
         brainMsg = "✕ " + (j.error || "save failed");
         return;
       }
-      brain = j.brain;
-      brainModel = brain.model || "";
-      brainEffort = brain.effort || "";
-      syncProviderFromModel();
+      // PUT tak mengembalikan katalog → muat ulang agar daftar provider/model
+      // langsung mengikuti agen yang baru dipilih (muse = model terkurasi +
+      // effort; opencode = provider + model terautentikasi; provider disembunyikan
+      // bila katalog tak punya provider).
+      await loadBrain();
       brainMsg = "✓ saved — applies to next spawn";
     } catch {
       brainMsg = "✕ save failed";
@@ -420,14 +452,16 @@
       const r = await api(`/api/tasks/${encodeURIComponent(fTarget)}/followup`, {
         method: "POST", body: JSON.stringify({ prompt: fText.trim() }),
       });
+      const j = await r.json().catch(() => ({}));
       if (!r.ok) {
-        const j = await r.json().catch(() => ({}));
-        revErr = j.error || "failed to send";
+        revErr = "✕ " + (j.error || "failed to send");
         return;
       }
       fTarget = null;
       fText = "";
       await load();
+    } catch (e) {
+      revErr = "✕ " + (e?.message || "send failed");
     } finally {
       busy = "";
     }
@@ -458,6 +492,61 @@
   async function cancel(id) {
     if (!confirm(`Stop task ${id}? The muse process will be killed.`)) return;
     await act(`/api/tasks/${encodeURIComponent(id)}/cancel`, {});
+  }
+
+  async function runTask(id) {
+    busy = "run";
+    try {
+      const r = await api(`/api/tasks/${encodeURIComponent(id)}/rerun`, { method: "POST" });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        alert(j.error || "run failed");
+        return;
+      }
+      await load();
+    } finally {
+      busy = "";
+    }
+  }
+
+  async function delTask(id, title) {
+    if (!confirm(`Delete task ${id} (${title})? It will be removed from the stack entirely (no history).`)) return;
+    busy = "del";
+    try {
+      const r = await api(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        alert(j.error || "delete failed");
+        return;
+      }
+      if (detailId === id) detailId = null;
+      if (logId === id) closeLog();
+      await load();
+    } finally {
+      busy = "";
+    }
+  }
+
+  async function sendCorrect() {
+    if (!cTarget || !cText.trim()) return;
+    if (!confirm(`Correct task ${cTarget}? The running process will be stopped, your note appended to its prompt, and the task requeued.`)) return;
+    cErr = "";
+    busy = "correct";
+    try {
+      const r = await api(`/api/tasks/${encodeURIComponent(cTarget)}/correct`, {
+        method: "POST", body: JSON.stringify({ correction: cText.trim() }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) {
+        cErr = "✕ " + (j.error || "correction rejected (task already finished?)");
+        return;
+      }
+      cTarget = null;
+      cText = "";
+      await load();
+    } finally {
+      busy = "";
+    }
   }
 
   function openLog(id) {
@@ -702,7 +791,7 @@
   function evCls(e) {
     if (/done|\bOK\b|resum|wake/i.test(e)) return "v-ok";
     if (/fail|reject|error|cancel/i.test(e)) return "v-err";
-    if (/limit|escalat|auto|approval|cooldown|sleep|quota/i.test(e)) return "v-warn";
+    if (/limit|escalat|auto|approval|sleep/i.test(e)) return "v-warn";
     return "v-dim";
   }
   function ago(iso) {
@@ -722,8 +811,6 @@
     if (/approval\?/.test(msg)) return { label: "Waiting approval", cls: "v-warn" };
     if (/approval OK|approved/.test(msg)) return { label: "Approved", cls: "v-ok" };
     if (/limit/.test(msg)) return { label: "Token limit", cls: "v-warn" };
-    if (/cooldown/.test(msg)) return { label: "Waiting", cls: "v-warn" };
-    if (/reset/.test(msg)) return { label: "Token reset", cls: "v-warn" };
     if (/resume|wake/.test(msg)) return { label: "Resuming", cls: "v-ok" };
     if (/^push /.test(msg)) return { label: "Queued", cls: "v-dim" };
     if (/pipeline .* DONE/.test(msg)) return { label: "Pipeline done", cls: "v-ok" };
@@ -817,26 +904,24 @@
     return () => { clearInterval(t1); clearInterval(t2); };
   });
 
-  let tasks = $derived((snap?.stack || []).filter((t) => ["queued", "running", "waiting_approval", "waiting_quota"].includes(t.status)).reverse());
+  let tasks = $derived((snap?.stack || []).filter((t) => ["queued", "running", "waiting_approval"].includes(t.status)).reverse());
   let doneCount = $derived((snap?.stack || []).filter((t) => t.status === "done").length);
   let failCount = $derived((snap?.stack || []).filter((t) => t.status === "failed").length);
   let sleeping = $derived(!!snap?.sleepUntil && Date.parse(snap.sleepUntil) > now);
-  let cooling = $derived(!!snap?.limitCooldownUntil && Date.parse(snap.limitCooldownUntil) > now);
   let current = $derived(
     (snap?.stack || []).find((t) => t.status === "running") ||
     (snap?.stack || []).find((t) => t.status === "waiting_approval") ||
-    (snap?.stack || []).find((t) => t.status === "waiting_quota") ||
     [...(snap?.stack || [])].reverse().find((t) => t.status === "queued") ||
     null
   );
   let aiState = $derived(
     (snap?.approvals?.length || 0) > 0 ? { label: "WAITING APPROVAL", cls: "v-warn" }
-    : cooling ? { label: "QUOTA COOLDOWN", cls: "v-warn" }
     : sleeping ? { label: "SLEEPING", cls: "v-dim" }
     : current?.status === "running" ? { label: "WORKING", cls: "v-ok" }
     : current ? { label: "READY", cls: "v-ok" }
     : { label: "IDLE", cls: "v-dim" }
   );
+  let agentLabel = $derived((brain || meta?.brain)?.agent === "opencode" ? "OpenCode" : "Muse Code");
   let history = $derived((snap?.stack || []).filter((t) => t.status === "done" || t.status === "failed").slice(-5).reverse());
   let nextQueued = $derived([...(snap?.stack || [])].reverse().filter((t) => t.status === "queued").slice(0, 3));
   let recentEvents = $derived((snap?.events || []).slice(-4).reverse());
@@ -861,7 +946,7 @@
   let timeline = $derived(
     (snap?.events || [])
       .filter((e) => !/graph →/.test(e.slice(25)))
-      .filter((e) => /push |run |done |fail|reject|cancel|limit|cooldown|reset|resum|wake|approval|auto-decision|escalat|sleep|quota|project [+-]|pipeline/.test(e.slice(25)))
+      .filter((e) => /push |run |done |fail|reject|cancel|limit|resum|wake|approval|auto-decision|escalat|sleep|project [+-]|pipeline/.test(e.slice(25)))
       .slice(-10)
       .reverse()
       .map((e) => ({ t: e.slice(11, 19), ...tlKind(e.slice(25)) }))
@@ -901,7 +986,7 @@
     <span class="pill {aiState.cls}"><span class="pdot"></span>{aiState.label}</span>
     {#if brain}
       <button class="ghost brain-badge" onclick={() => { view = "system"; }} title="active brain — click to change in System">
-        {brain.agent === "opencode" ? "opencode · " : ""}{brain.bin} · {brain.model || "default"} · {brain.effort || "default"}
+        {brain.agent} · {brain.bin} · {brain.model || "default"} · {brain.effort || "default"}
       </button>
     {/if}
     <span class="clock">{new Date(now).toLocaleString("en-US")}</span>
@@ -949,7 +1034,7 @@
         </div>
       </div>
       <div class="ph-meta">
-        <div><span class="k">Agent</span><span>Muse Code</span></div>
+        <div><span class="k">Agent</span><span>{agentLabel}</span></div>
         <div><span class="k">Session</span><span>{current ? current.id.slice(-6) : "—"}</span></div>
       </div>
       <span class="pill {aiState.cls}"><span class="pdot"></span>{aiState.label}</span>
@@ -975,7 +1060,7 @@
         <h2>status</h2>
         <div class="statline"><span class="pulse"></span><span class="statbig {aiState.cls}">{aiState.label}</span></div>
         <div class="hint">
-          {aiState.label === "WORKING" ? "Muse Code is working" : aiState.label === "WAITING APPROVAL" ? "needs your decision" : aiState.label === "QUOTA COOLDOWN" ? "waiting for the quota reset" : aiState.label === "SLEEPING" ? "quiet but alert" : "waiting for tasks"}
+          {aiState.label === "WORKING" ? `${agentLabel} is working` : aiState.label === "WAITING APPROVAL" ? "needs your decision" : aiState.label === "SLEEPING" ? "quiet but alert" : "waiting for tasks"}
         </div>
         <svg class="spark" viewBox="0 0 260 40" preserveAspectRatio="none" aria-hidden="true"><polyline points={spark} /></svg>
         <div class="row"><span class="k">task</span><span>{current?.title || "—"}</span></div>
@@ -1045,6 +1130,19 @@
             <div class="row"><span class={f.cls}>{f.mark}</span><span>{f.path}</span></div>
           {/each}
         {/if}
+        {#if current && (current.status === "running" || current.status === "queued")}
+          {#if cTarget === current.id}
+            <label for="cor">correct {current.id} — stops the run, amends the prompt, requeues</label>
+            <div style="display:flex; gap:8px">
+              <input id="cor" type="text" bind:value={cText} placeholder="e.g. pakai Elysia, bukan Express" />
+              <button onclick={sendCorrect} disabled={busy === "correct" || !cText.trim()} style="white-space:nowrap">[send]</button>
+              <button class="ghost" onclick={() => { cTarget = null; cText = ""; cErr = ""; }}>[cancel]</button>
+            </div>
+            {#if cErr}<div class="hint" style="color:var(--err, #f66)">{cErr}</div>{/if}
+          {:else}
+            <div class="btnrow"><button class="ghost" onclick={() => { cTarget = current.id; cText = ""; cErr = ""; }} disabled={!!busy}>[correct]</button></div>
+          {/if}
+        {/if}
       </div>
       <div class="panel">
         <h2>activity_stream</h2>
@@ -1086,13 +1184,13 @@
         <div class="panel">
           <h2>project</h2>
           <div class="minititle">▤ {current?.project || "—"}</div>
-          <div class="row"><span class="k">runtime</span><span>Muse Code</span></div>
+          <div class="row"><span class="k">runtime</span><span>{agentLabel}</span></div>
           <div class="row"><span class="k">session</span><span>{current ? current.id.slice(-6) : "—"}</span></div>
           <div class="row"><span class="k">activity</span><span>{ago(lastEventIso)}</span></div>
         </div>
         <div class="panel">
           <h2>agent</h2>
-          <div class="minititle">✦ MUSE CODE <span class={meta?.brain?.ok ? "v-ok" : "v-err"}>● {meta?.brain?.ok ? "Connected" : "Offline"}</span></div>
+          <div class="minititle">✦ {agentLabel.toUpperCase()} <span class={meta?.brain?.ok ? "v-ok" : "v-err"}>● {meta?.brain?.ok ? "Connected" : "Offline"}</span></div>
           <div class="row"><span class="k">runtime</span><span>{aiState.label}</span></div>
           <div class="row"><span class="k">can</span><span class="v-dim">coding · graph · resume · estimates</span></div>
         </div>
@@ -1177,8 +1275,8 @@
         {#if !tasks.length}<span class="v-dim">empty.</span>{/if}
         {#each tasks as t (t.id)}
           <div class="row">
-            <span class={t.status === "waiting_approval" || t.status === "waiting_quota" ? "v-warn" : t.status === "running" ? "v-ok" : "v-dim"}>
-              {t.status === "running" ? "▶" : t.status === "waiting_approval" ? "◆" : t.status === "waiting_quota" ? "⏳" : "·"}
+            <span class={t.status === "waiting_approval" ? "v-warn" : t.status === "running" ? "v-ok" : "v-dim"}>
+              {t.status === "running" ? "▶" : t.status === "waiting_approval" ? "◆" : "·"}
               {t.status}
             </span>
             <span>{t.title}{t.project ? ` @${t.project}` : ""}
@@ -1189,6 +1287,7 @@
               <button class="ghost" onclick={() => { detailId = detailId === t.id ? null : t.id; }}>[detail]</button>
               <button class="ghost" onclick={() => openLog(t.id)}>[log]</button>
               <button class="ghost danger" onclick={() => cancel(t.id)} disabled={!!busy}>[stop]</button>
+              <button class="ghost danger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</button>
             </span>
           </div>
           {#if detailId === t.id}{@render taskDetail(t)}{/if}
@@ -1203,6 +1302,8 @@
             <span style="margin-left:auto; display:flex; gap:6px">
               <button class="ghost" onclick={() => { detailId = detailId === t.id ? null : t.id; }}>[detail]</button>
               <button class="ghost" onclick={() => openLog(t.id)}>[log]</button>
+              <button class="ghost" onclick={() => runTask(t.id)} disabled={!!busy} title="requeue without changing the prompt">[run]</button>
+              <button class="ghost danger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</button>
             </span>
           </div>
           {#if detailId === t.id}{@render taskDetail(t)}{/if}
@@ -1403,7 +1504,7 @@
           {#each revTasks as t (t.id)}
             <div class="row">
               <span class={t.status === "done" ? "v-ok" : t.status === "failed" ? "v-err" : t.status === "running" ? "v-ok" : "v-warn"}>
-                {t.status === "done" ? "✓" : t.status === "failed" ? "✕" : t.status === "running" ? "▶" : t.status === "waiting_quota" ? "⏳" : "·"} {t.status}
+                {t.status === "done" ? "✓" : t.status === "failed" ? "✕" : t.status === "running" ? "▶" : "·"} {t.status}
               </span>
               <span>{t.title}</span>
               {#if t.phase}<span class="v-dim">[{t.phase}]</span>{/if}
@@ -1412,6 +1513,10 @@
                 <button class="ghost" onclick={() => goLog(t.id)}>[log]</button>
                 <button class="ghost" onclick={() => { revActId = revActId === t.id ? null : t.id; }}>[tools]</button>
                 <button class="ghost" onclick={() => { fTarget = t.id; }}>[follow up]</button>
+                {#if t.status === "done" || t.status === "failed"}
+                  <button class="ghost" onclick={() => runTask(t.id)} disabled={!!busy} title="requeue without changing the prompt">[run]</button>
+                {/if}
+                <button class="ghost danger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</button>
               </span>
             </div>
             {#if showNote === t.id}
@@ -1649,18 +1754,7 @@
               </div>
               <div class="flex items-center justify-between gap-3 border-b border-border py-1.5">
                 <dt class="text-xs text-muted-foreground">mode</dt>
-                <dd class="text-sm">{#if meta?.dryRun}<Badge variant="warning" title="simulation, no quota">dry-run</Badge>{:else}<Badge variant="success">live</Badge>{/if}</dd>
-              </div>
-              <div class="flex items-center justify-between gap-3 border-b border-border py-1.5">
-                <dt class="text-xs text-muted-foreground">quota</dt>
-                <dd class="text-sm">
-                  {#if cooling}<Badge variant="destructive">cooldown</Badge>
-                  {:else}<Badge variant="warning">normal</Badge>{/if}
-                </dd>
-              </div>
-              <div class="flex items-center justify-between gap-3 border-b border-border py-1.5">
-                <dt class="text-xs text-muted-foreground">last reset</dt>
-                <dd class="truncate text-sm text-muted-foreground">{snap.lastReset || "—"}</dd>
+                <dd class="text-sm">{#if meta?.dryRun}<Badge variant="warning" title="simulation">dry-run</Badge>{:else}<Badge variant="success">live</Badge>{/if}</dd>
               </div>
               <div class="flex items-center justify-between gap-3 border-b border-border py-1.5">
                 <dt class="text-xs text-muted-foreground">loop tick</dt>
@@ -1682,7 +1776,22 @@
           <CardContent>
             <div class="border-b border-border pb-4">
               <div class="mb-2 text-xs font-medium">model_control</div>
-              <div class="mb-3 truncate text-xs text-muted-foreground">{brain ? `${brain.agent === "opencode" ? "opencode · " : ""}${brain.bin}${brain.subcommand ? " " + brain.subcommand : " -p"}` : "…"} · {brain?.model || "default CLI"} ({brain?.modelSource || "…"}) · {brain?.effort || "default CLI"} ({brain?.effortSource || "…"})</div>
+              <div class="mb-3 truncate text-xs text-muted-foreground">{brain ? `${brain.agent} (${brain.agentSource}) · ${brain.bin}${brain.subcommand ? " " + brain.subcommand : " -p"}` : "…"} · {brain?.model || "default CLI"} ({brain?.modelSource || "…"}) · {brain?.effort || "default CLI"} ({brain?.effortSource || "…"})</div>
+              <div class="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label for="bagent" class="mb-1 block text-xs font-medium">coding agent</label>
+                  <Select
+                    bind:value={brainAgent}
+                    label="coding agent"
+                    placeholder="— env default —"
+                    options={agentOptions}
+                  />
+                </div>
+                <div>
+                  <label for="bbin" class="mb-1 block text-xs font-medium">binary (empty = env default)</label>
+                  <Input id="bbin" bind:value={brainBin} placeholder="muse / opencode" autocomplete="off" />
+                </div>
+              </div>
               <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 {#if (brain?.catalog?.providers || []).length}
                   <div>

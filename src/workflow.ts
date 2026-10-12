@@ -33,6 +33,25 @@ export function pushTask(
   return t;
 }
 
+/**
+ * Koreksi tugas yang sedang berjalan/antre: arahan admin ditempel ke prompt,
+ * progres graph dibuang (plan ulang bersih), tugas kembali queued.
+ * Pemanggil menghentikan proses yang sedang jalan bila ada.
+ * Hanya untuk status running/queued; koreksi kosong/hasil selesai → false.
+ */
+export function correctTask(s: AltheaState, id: string, correction: string): boolean {
+  const t = s.stack.find((x) => x.id === id);
+  const text = String(correction || "").trim().slice(0, 2000);
+  if (!t || !text) return false;
+  if (t.status !== "running" && t.status !== "queued") return false;
+  t.prompt = `${t.prompt}\n\nAdmin correction: ${text}`;
+  t.graph = undefined;
+  t.status = "queued";
+  t.updatedAt = new Date().toISOString();
+  logEvent(s, `correct ${id} (requeued)`);
+  return true;
+}
+
 /** Tindak lanjut atas tugas lama: project diwarisi, note menaut ke induk. */
 export function pushFollowup(s: AltheaState, parentId: string, prompt: string): StackTask | null {
   const parent = s.stack.find((x) => x.id === parentId);
@@ -48,8 +67,6 @@ export function pushFollowup(s: AltheaState, parentId: string, prompt: string): 
 
 export function peek(s: AltheaState): StackTask | undefined {
   // Puncak = tugas aktif teratas yang belum done/failed.
-  // waiting_quota DIABAIKAN: tugas itu ditahan sampai cooldown tiba,
-  // lalu resumeQuotaTasks mengembalikannya ke queued (FR-4.2).
   for (let i = s.stack.length - 1; i >= 0; i--) {
     const t = s.stack[i];
     if (t.status === "queued" || t.status === "running" || t.status === "waiting_approval") {
@@ -131,62 +148,64 @@ export function resolveApproval(
 }
 
 /**
- * Limit terdeteksi (FR-4.1): tugas → waiting_quota (prompt tetap tersimpan →
- * auto-lanjut tanpa prompt ulang), catat episode ke riwayat kuota (FR-4.4).
- * Timer global cooldown tetap diurus enterLimitCooldown (claude.ts).
+ * Hasil run basi bila status tugas berubah saat run berjalan
+ * (correct → queued, cancel → failed): jangan diterapkan agar tak menimpa
+ * status baru. Run yang sehat selalu selesai dengan status "running".
  */
-export function markWaitingQuota(s: AltheaState, id: string, untilIso: string): boolean {
-  const t = s.stack.find((x) => x.id === id);
-  if (!t) return false;
-  const now = new Date().toISOString();
-  t.status = "waiting_quota";
-  t.updatedAt = now;
-  s.quotaHistory.push({
-    taskId: id, title: t.title, hitAt: now, resumeAt: null, waitMs: null, until: untilIso,
-  });
-  if (s.quotaHistory.length > 50) s.quotaHistory = s.quotaHistory.slice(-50);
-  logEvent(s, `quota ${id} → waiting_quota (estimated reset ${untilIso})`);
-  return true;
-}
-
-/** Tutup episode kuota terbuka milik tugas (dipakai resume maupun batal). */
-function closeQuotaEntry(s: AltheaState, id: string, nowIso: string): void {
-  for (let i = s.quotaHistory.length - 1; i >= 0; i--) {
-    const e = s.quotaHistory[i];
-    if (e.taskId === id && e.resumeAt === null) {
-      e.resumeAt = nowIso;
-      e.waitMs = Math.max(0, Date.parse(nowIso) - Date.parse(e.hitAt));
-      break;
-    }
-  }
+export function shouldApplyRunResult(t: StackTask): boolean {
+  return t.status === "running";
 }
 
 /**
- * Cooldown tiba (FR-4.2): semua tugas waiting_quota → queued agar dikerjakan
- * lagi tanpa prompt ulang. Kembalikan daftar tugas yang di-resume.
+ * Jalankan (ulang) tugas yang sudah selesai/gagal tanpa mengubah prompt:
+ * status kembali queued agar loop mengambilnya. Progres graph dipertahankan
+ * (lanjut dari feedback terakhir), attempts tak diubah.
  */
-export function resumeQuotaTasks(s: AltheaState): StackTask[] {
-  const now = new Date().toISOString();
-  const out: StackTask[] = [];
-  for (const t of s.stack) {
-    if (t.status === "waiting_quota") {
-      t.status = "queued";
-      t.updatedAt = now;
-      closeQuotaEntry(s, t.id, now);
-      out.push(t);
-    }
-  }
-  if (out.length) logEvent(s, `quota recovered → resume ${out.length} task(s) (${out.map((t) => t.id).join(",")})`);
-  return out;
+export function requeueTask(s: AltheaState, id: string): boolean {
+  const t = s.stack.find((x) => x.id === id);
+  if (!t) return false;
+  if (t.status !== "done" && t.status !== "failed") return false;
+  t.status = "queued";
+  t.updatedAt = new Date().toISOString();
+  logEvent(s, `requeue ${id}`);
+  return true;
 }
 
-/** Batalkan tugas aktif (queued/running/waiting_approval/waiting_quota) → failed. */
+/**
+ * Hapus tugas dari stack sepenuhnya (beda dengan cancel yang menyisakan
+ * jejak failed). Approval, log, dan aktivitas miliknya ikut dibersihkan.
+ * Pemanggil mematikan proses + menjeda pipeline bila perlu sebelum ini.
+ */
+export function deleteTask(s: AltheaState, id: string): boolean {
+  const i = s.stack.findIndex((x) => x.id === id);
+  if (i < 0) return false;
+  s.stack.splice(i, 1);
+  s.approvals = s.approvals.filter((a) => a.id !== id);
+  delete s.logs[id];
+  delete s.activity[id];
+  logEvent(s, `delete ${id}`);
+  return true;
+}
+
+/**
+ * Minta izin: baca baris "IZIN: ..." dari output AI. Toleran terhadap gaya
+ * tulis AI: bold markdown di kiri/kanan (`**IZIN:** ...`, `**IZIN**: ...`),
+ * spasi sebelum titik-dua, huruf besar/kecil. Kembalikan pertanyaan
+ * (maks 500 char) atau null bila tak ada permintaan izin.
+ */
+export function parseIzinRequest(output: string): string | null {
+  const m = String(output || "").match(/^\s*\*{0,2}IZIN\*{0,2}\s*:\s*\*{0,2}\s*(.+)/im);
+  if (!m) return null;
+  const q = m[1].replace(/\*+$/, "").trim();
+  return q ? q.slice(0, 500) : null;
+}
+
+/** Batalkan tugas aktif (queued/running/waiting_approval) → failed. */
 export function cancelTask(s: AltheaState, id: string, note = "cancelled by admin"): boolean {
   const t = s.stack.find((x) => x.id === id);
   if (!t) return false;
-  if (!["queued", "running", "waiting_approval", "waiting_quota"].includes(t.status)) return false;
+  if (!["queued", "running", "waiting_approval"].includes(t.status)) return false;
   s.approvals = s.approvals.filter((a) => a.id !== id);
-  if (t.status === "waiting_quota") closeQuotaEntry(s, id, new Date().toISOString());
   t.status = "failed";
   t.note = note;
   t.updatedAt = new Date().toISOString();
@@ -206,7 +225,7 @@ export function buildAskPrompt(question: string): string {
 }
 
 export function stackSummary(s: AltheaState): string {
-  const aktif = s.stack.filter((t) => ["queued", "running", "waiting_approval", "waiting_quota"].includes(t.status));
+  const aktif = s.stack.filter((t) => ["queued", "running", "waiting_approval"].includes(t.status));
   if (aktif.length === 0) return "Stack empty. /add Title | prompt to fill it.";
   return aktif
     .slice(-10)

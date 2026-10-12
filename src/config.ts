@@ -1,6 +1,8 @@
 // Konfigurasi dari env. Sengaja tanpa lib dotenv: parse file .env manual agar nol dependensi.
 import { readFileSync, existsSync } from "node:fs";
-import { DEFAULT_PREVIEW_BASE_PORT } from "./preview.js";
+
+/** Port awal alokasi preview (satu port per preview yang jalan, 9001–9090). */
+export const DEFAULT_PREVIEW_BASE_PORT = 9001;
 
 function loadDotEnv(path = ".env"): void {
   if (!existsSync(path)) return;
@@ -23,6 +25,11 @@ loadDotEnv();
 function num(name: string, dflt: number): number {
   const v = Number(process.env[name]);
   return Number.isFinite(v) && v >= 0 ? v : dflt;
+}
+
+/** Runner JS valid ("bun") atau fallback "npm". */
+export function normalizeJsRunner(v: unknown): "npm" | "bun" {
+  return String(v ?? "").trim().toLowerCase() === "bun" ? "bun" : "npm";
 }
 
 // Otak: agen coding — "muse" (Muse Code) atau "opencode" (OpenCode).
@@ -67,7 +74,6 @@ export const config = {
   brainSubcommand: resolveBrainSubcommand(brainAgent),
   brainModel: (process.env.BRAIN_MODEL || "").trim(),
   brainEffort: (process.env.BRAIN_EFFORT || "").trim().toLowerCase(),
-  claudeResetHours: num("CLAUDE_RESET_HOURS", 5) || 5,
   claudeTimeoutSeconds: num("CLAUDE_TIMEOUT_SECONDS", 1800) || 1800,
   taskMaxAttempts: num("TASK_MAX_ATTEMPTS", 3) || 3,
   claudeDryRun: process.env.CLAUDE_DRY_RUN === "1",
@@ -92,7 +98,10 @@ export const config = {
   // Remote GitHub otomatis saat create project: git@github.com:USER/name.git.
   // Kosong = lewati (remote bawaan hasil clone tak pernah ditimpa).
   githubUsername: (process.env.GITHUB_USERNAME || "").trim(),
-  // Verifier deterministik (FR-3.10): skrip npm project setelah implementasi.
+  // Runner skrip JS project (verifier + default preview): "npm" atau "bun".
+  // Nilai asing = npm. Butuh bun terinstal bila diisi "bun".
+  jsRunner: ((process.env.JS_RUNNER || "").trim().toLowerCase() === "bun" ? "bun" : "npm") as "npm" | "bun",
+  // Verifier deterministik (FR-3.10): skrip JS project setelah implementasi.
   verifyEnabled: process.env.VERIFY_ENABLED !== "0",
   verifyScripts: (process.env.VERIFY_SCRIPTS || "check,test,build").split(",").map((s) => s.trim()).filter(Boolean),
   verifyTimeoutMs: (num("VERIFY_TIMEOUT_SECONDS", 180) || 180) * 1000,
@@ -106,5 +115,3 @@ export const config = {
   // Pipeline project: maks ronde fase fitur (tiap ronde = 1 tugas implementasi).
   pipelineFeatureRounds: num("PIPELINE_FEATURE_ROUNDS", 3) || 3,
 };
-
-export const resetMs = () => config.claudeResetHours * 3600_000;

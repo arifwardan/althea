@@ -1,106 +1,79 @@
-// FR-4 kuota ±5 jam: waiting_quota per-run + riwayat kuota + resume otomatis.
-// Jalankan: npm test (tsx + node:test, tanpa dependensi baru).
+// Tanpa cooldown kuota: limit provider langsung menggagalkan tugas.
+// State lama (waiting_quota / limitCooldownUntil / quotaHistory) dimigrasi
+// agar langsung antre lagi. Jalankan: npm test (tsx + node:test).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { defaultState, loadState } from "../src/state.js";
-import {
-  pushTask, peek, cancelTask, markWaitingQuota, resumeQuotaTasks, stackSummary,
-} from "../src/workflow.js";
+import { defaultState, loadState, saveState } from "../src/state.js";
+import { pushTask, peek, cancelTask, stackSummary } from "../src/workflow.js";
+import { buildReport } from "../src/report.js";
 
-describe("markWaitingQuota (FR-4.1)", () => {
-  it("tugas → waiting_quota + episode tercatat (estimasi ikut)", () => {
+describe("tanpa cooldown kuota", () => {
+  it("defaultState tak punya field kuota", () => {
+    const s = defaultState();
+    assert.ok(!("limitCooldownUntil" in s));
+    assert.ok(!("lastReset" in s));
+    assert.ok(!("quotaHistory" in s));
+  });
+  it("tak ada status waiting_quota di jalur aktif", () => {
     const s = defaultState();
     const t = pushTask(s, "tugas A", "kerjakan A");
-    const until = new Date(Date.now() + 3600_000).toISOString();
-    assert.equal(markWaitingQuota(s, t.id, until), true);
-    assert.equal(t.status, "waiting_quota");
-    assert.equal(s.quotaHistory.length, 1);
-    const e = s.quotaHistory[0];
-    assert.equal(e.taskId, t.id);
-    assert.equal(e.title, "tugas A");
-    assert.equal(e.until, until);
-    assert.equal(e.resumeAt, null);
-    assert.equal(e.waitMs, null);
-    assert.ok(Date.parse(e.hitAt) > 0);
-  });
-  it("id tak dikenal → false, tanpa riwayat", () => {
-    const s = defaultState();
-    assert.equal(markWaitingQuota(s, "t_takada", new Date().toISOString()), false);
-    assert.equal(s.quotaHistory.length, 0);
-  });
-  it("riwayat dipangkas ke 50 terakhir", () => {
-    const s = defaultState();
-    const t = pushTask(s, "tugas B", "kerjakan B");
-    const until = new Date().toISOString();
-    for (let i = 0; i < 55; i++) markWaitingQuota(s, t.id, until);
-    assert.equal(s.quotaHistory.length, 50);
-  });
-});
-
-describe("resumeQuotaTasks (FR-4.2)", () => {
-  it("waiting_quota → queued + episode ditutup (durasi jeda terisi)", () => {
-    const s = defaultState();
-    const a = pushTask(s, "tugas A", "kerjakan A");
-    const b = pushTask(s, "tugas B", "kerjakan B");
-    markWaitingQuota(s, a.id, new Date().toISOString());
-    const out = resumeQuotaTasks(s);
-    assert.equal(out.length, 1);
-    assert.equal(a.status, "queued");
-    assert.equal(b.status, "queued"); // tak tersentuh (bukan waiting_quota)
-    const e = s.quotaHistory[s.quotaHistory.length - 1];
-    assert.ok(e.resumeAt !== null);
-    assert.ok(typeof e.waitMs === "number" && (e.waitMs as number) >= 0);
-  });
-  it("tanpa waiting_quota → kosong, tanpa log bising", () => {
-    const s = defaultState();
-    pushTask(s, "tugas A", "kerjakan A");
-    assert.deepEqual(resumeQuotaTasks(s), []);
-  });
-});
-
-describe("interaksi status kuota", () => {
-  it("peek melewati waiting_quota (ditahan sampai resume)", () => {
-    const s = defaultState();
-    const t = pushTask(s, "tugas A", "kerjakan A");
-    markWaitingQuota(s, t.id, new Date().toISOString());
-    assert.equal(peek(s), undefined);
-    resumeQuotaTasks(s);
+    assert.equal(t.status, "queued");
     assert.equal(peek(s)?.id, t.id);
-  });
-  it("cancelTask bisa membatalkan waiting_quota + menutup episode", () => {
-    const s = defaultState();
-    const t = pushTask(s, "tugas A", "kerjakan A");
-    markWaitingQuota(s, t.id, new Date().toISOString());
+    assert.match(stackSummary(s), /queued/);
+    assert.doesNotMatch(stackSummary(s), /waiting_quota/);
     assert.equal(cancelTask(s, t.id), true);
     assert.equal(t.status, "failed");
-    assert.ok(s.quotaHistory[0].resumeAt !== null);
   });
-  it("stackSummary menghitung waiting_quota sebagai aktif", () => {
+  it("laporan tak menyinggung cooldown/reset kuota", () => {
     const s = defaultState();
-    const t = pushTask(s, "tugas A", "kerjakan A");
-    markWaitingQuota(s, t.id, new Date().toISOString());
-    assert.match(stackSummary(s), /waiting_quota/);
+    pushTask(s, "tugas A", "kerjakan A");
+    const r = buildReport(s);
+    assert.doesNotMatch(r, /cooldown/i);
+    assert.doesNotMatch(r, /quota/i);
+    assert.doesNotMatch(r, /reset/i);
   });
 });
 
-describe("migrasi state lama (FR-4.4)", () => {
-  it("state tanpa quotaHistory dapat []", () => {
+describe("migrasi state lama ber-cooldown", () => {
+  it("waiting_quota → queued, field kuota dibuang", () => {
+    const dir = mkdtempSync(join(tmpdir(), "althea-quota-"));
+    const p = join(dir, "state.json");
+    const legacy = {
+      version: 1,
+      stack: [{
+        id: "t_lama", title: "tugas lama", prompt: "kerjakan",
+        status: "waiting_quota", attempts: 1, note: "",
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      }],
+      limitCooldownUntil: new Date(Date.now() + 3600_000).toISOString(),
+      lastReset: null,
+      quotaHistory: [{
+        taskId: "t_lama", title: "tugas lama", hitAt: new Date().toISOString(),
+        resumeAt: null, waitMs: null, until: new Date().toISOString(),
+      }],
+    };
+    writeFileSync(p, JSON.stringify(legacy));
+    const s = loadState(p);
+    assert.equal(s.stack[0].status, "queued"); // langsung antre lagi, tak ditahan
+    assert.equal(peek(s)?.id, "t_lama");
+    assert.ok(!("limitCooldownUntil" in s));
+    assert.ok(!("lastReset" in s));
+    assert.ok(!("quotaHistory" in s));
+    // Tersimpan bersih saat save berikutnya.
+    saveState(p, s);
+    const raw = JSON.parse(readFileSync(p, "utf8"));
+    assert.ok(!("limitCooldownUntil" in raw));
+    assert.ok(!("quotaHistory" in raw));
+  });
+  it("state lama tanpa field kuota tetap valid", () => {
     const dir = mkdtempSync(join(tmpdir(), "althea-quota-"));
     const p = join(dir, "state.json");
     writeFileSync(p, JSON.stringify({ version: 1, stack: [] }));
-    assert.deepEqual(loadState(p).quotaHistory, []);
-  });
-  it("riwayat lama yang rusak dibersihkan, yang valid dipertahankan", () => {
-    const dir = mkdtempSync(join(tmpdir(), "althea-quota-"));
-    const bad = join(dir, "bad.json");
-    writeFileSync(bad, JSON.stringify({ version: 1, quotaHistory: "rusak" }));
-    assert.deepEqual(loadState(bad).quotaHistory, []);
-    const good = join(dir, "good.json");
-    const ev = { taskId: "t_x", title: "A", hitAt: new Date().toISOString(), resumeAt: null, waitMs: null, until: new Date().toISOString() };
-    writeFileSync(good, JSON.stringify({ version: 1, quotaHistory: [ev] }));
-    assert.deepEqual(loadState(good).quotaHistory, [ev]);
+    const s = loadState(p);
+    assert.equal(s.stack.length, 0);
+    assert.ok(!("limitCooldownUntil" in s));
   });
 });

@@ -1,13 +1,14 @@
 // Entry: runtime hidup — loop otonom + web + telegram polling.
-// Urutan tiap tick: telegram → approval? → tidur? → limit? → kerjakan puncak stack.
+// Urutan tiap tick: telegram → approval? → tidur? → kerjakan puncak stack.
+// Tanpa cooldown kuota: limit provider langsung menggagalkan tugas.
 import { existsSync } from "node:fs";
 import { config } from "./config.js";
 import { loadState, saveState, logEvent, appendLog, appendActivity } from "./state.js";
 import { addRun, emptyUsage } from "./tokens.js";
-import { peek, markDone, markFailed, noteTimeout, requestApproval, resolveApproval, markWaitingQuota, resumeQuotaTasks, buildAskPrompt } from "./workflow.js";
+import { peek, markDone, markFailed, noteTimeout, requestApproval, resolveApproval, buildAskPrompt, shouldApplyRunResult, parseIzinRequest } from "./workflow.js";
 import { processEscalations } from "./escalation.js";
 import { isSleeping, forceWake } from "./sleeper.js";
-import { runClaude, enterLimitCooldown, limitDue, brainSummary, effectiveBrain, effectiveTimeoutSeconds } from "./claude.js";
+import { runClaude, brainSummary, effectiveBrain, effectiveTimeoutSeconds } from "./claude.js";
 import { checkBrain } from "./metrics.js";
 import { projectDir } from "./projects.js";
 import { advancePipeline, pipelineOnFail, graphModeForPhase, reviewBriefForPhase } from "./pipeline.js";
@@ -54,19 +55,6 @@ async function tick(): Promise<void> {
 
   if (state.approvals.length > 0) return; // tunggu izin, jangan kerjakan lain
   if (isSleeping(state)) { save(); return; }
-  const inCooldown = !!state.limitCooldownUntil;
-  if (!limitDue(state)) { save(); return; } // cooldown limit → resume saat tiba
-  if (inCooldown) {
-    // FR-4.2 + FR-4.3: cooldown kedaluwarsa → tugas waiting_quota lanjut
-    // otomatis tanpa prompt ulang + notifikasi resume (web via event, Telegram).
-    const resumed = resumeQuotaTasks(state);
-    save();
-    if (resumed.length > 0) {
-      await notifyAdmins(
-        `Quota recovered — auto-resume\n${resumed.length} task(s) continuing without re-prompting: ${resumed.map((t) => `"${t.title}" (${t.id})`).join(", ")}.`
-      );
-    }
-  }
   if (working) return;
 
   // Preflight: jangan bakar ronde graph bila perintah otak tak bisa jalan.
@@ -187,6 +175,14 @@ async function tick(): Promise<void> {
     addRun(state.usage, charsIn, charsOut);
     save(); // pastikan log lengkap tersimpan saat run selesai
     if (r.cancelled) return; // kill-switch: state sudah diurus endpoint cancel
+    if (!shouldApplyRunResult(top)) {
+      // Tugas diubah saat run berjalan (correct → queued, cancel → failed):
+      // hasil basi dibuang agar tak menimpa status baru. Tugas correct akan
+      // dikerjakan ulang dengan prompt yang sudah ditempel arahan.
+      logEvent(state, `stale result ${top.id} ignored (status ${top.status})`);
+      save();
+      return;
+    }
     if (r.timedOut) {
       const action = noteTimeout(state, top.id, config.taskMaxAttempts);
       save();
@@ -201,19 +197,22 @@ async function tick(): Promise<void> {
           (pf ? `\nPipeline "${pf.project}" stopped at phase ${pf.phase}.` : ""));
       }
     } else if (r.hitLimit) {
-      // FR-4.1: JANGAN done/failed — tugas → waiting_quota, prompt tersimpan → auto-lanjut.
-      const until = enterLimitCooldown(state, r.retryAfterMs);
-      markWaitingQuota(state, top.id, until);
+      // Tanpa cooldown: limit langsung menggagalkan tugas. Prompt tersimpan di
+      // state, jadi admin bisa jalankan ulang setelah ganti model/provider.
+      const hint = r.retryAfterMs ? ` Provider suggests retrying in about ${Math.round(r.retryAfterMs / 60000)} min.` : "";
+      markFailed(state, top.id, `provider limit hit.${hint} Switch to a model/provider with remaining quota, then re-run.`);
+      const pf = pipelineOnFail(state, top.id);
       save();
       await notifyAdmins(
-        `Token limit\nTask "${top.title}" (${top.id}) → waiting_quota, prompt safely stored.\nAuto-resume: ${until} (about ${config.claudeResetHours}h).\nSend /wake to check manually.`
+        `Token limit\nTask "${top.title}" (${top.id}) failed: provider quota exhausted.${hint}\nSwitch model/provider, then re-run the task.` +
+        (pf ? `\nPipeline "${pf.project}" stopped at phase ${pf.phase}.` : "")
       );
     } else if (r.ok) {
-      // Konvensi: output diawali "IZIN:" berarti butuh approve admin.
+      // Konvensi: baris "IZIN:" di output berarti butuh approve admin.
       // Muncul di web dulu; eskalasi ke Telegram + auto-keputusan diatur tick.
-      const izin = r.output.match(/^\s*IZIN:\s*(.+)/m);
+      const izin = parseIzinRequest(r.output);
       if (izin) {
-        requestApproval(state, top.id, izin[1].slice(0, 500));
+        requestApproval(state, top.id, izin);
         save();
       } else {
         markDone(state, top.id, (graphNote || r.output).slice(0, 1000));
@@ -259,4 +258,4 @@ const mati = () => { logEvent(state, "shutdown"); save(); process.exit(0); };
 process.on("SIGINT", mati);
 process.on("SIGTERM", mati);
 
-console.log(`[althea] alive. loop ${config.loopSeconds}s · reset ±${config.claudeResetHours}h · dry-run=${config.claudeDryRun ? "yes" : "no"} · brain ${brainSummary()}`);
+console.log(`[althea] alive. loop ${config.loopSeconds}s · dry-run=${config.claudeDryRun ? "yes" : "no"} · brain ${brainSummary()}`);

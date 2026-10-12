@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  BRAIN_EFFORTS, normalizeEffort, normalizeModel,
+  BRAIN_EFFORTS, normalizeEffort, normalizeModel, normalizeAgent, normalizeBin,
   effectiveBrain, brainArgs, setBrainOverride, spawnErrorNote,
   MUSE_MODELS, parseOpenCodeProviders, parseOpenCodeModels,
   listBrainModels, clearBrainCatalogCache,
@@ -31,6 +31,18 @@ describe("validasi model/effort", () => {
     assert.equal(normalizeModel("  m1  "), "m1");
     assert.equal(normalizeModel("x".repeat(200)).length, 120);
     assert.equal(normalizeModel(null), "");
+  });
+  it("agent hanya muse/opencode (case-insensitive), selain itu default", () => {
+    assert.equal(normalizeAgent("opencode"), "opencode");
+    assert.equal(normalizeAgent(" Muse "), "muse");
+    assert.equal(normalizeAgent(""), "");
+    assert.equal(normalizeAgent("claude"), "");
+    assert.equal(normalizeAgent(42), "");
+  });
+  it("bin di-trim dan dibatasi 200 karakter", () => {
+    assert.equal(normalizeBin("  opencode  "), "opencode");
+    assert.equal(normalizeBin("x".repeat(300)).length, 200);
+    assert.equal(normalizeBin(null), "");
   });
 });
 
@@ -61,6 +73,46 @@ describe("preseden: dashboard > env > default CLI", () => {
       const b = effectiveBrain(undefined, ENV);
       assert.equal(b.model, "m-baru");
       assert.equal(b.effort, "ultra");
+    } finally {
+      setBrainOverride({ model: "", effort: "" });
+    }
+  });
+  it("override agen dashboard menang atas env + subcommand mengikuti", () => {
+    const b = effectiveBrain({ model: "", effort: "", agent: "opencode", bin: "opencode" }, ENV);
+    assert.equal(b.agent, "opencode");
+    assert.equal(b.bin, "opencode");
+    assert.equal(b.subcommand, "run");
+    assert.equal(b.agentSource, "dashboard");
+    assert.equal(b.binSource, "dashboard");
+    const c = effectiveBrain({ model: "", effort: "", agent: "muse", bin: "" }, OC);
+    assert.equal(c.agent, "muse");
+    assert.equal(c.bin, "opencode"); // bin kosong = tetap env
+    assert.equal(c.subcommand, "exec");
+  });
+  it("bin kustom tanpa agen → ditebak dari nama biner", () => {
+    const b = effectiveBrain({ model: "", effort: "", bin: "/opt/OpenCode" }, ENV);
+    assert.equal(b.agent, "opencode");
+    assert.equal(b.bin, "/opt/OpenCode");
+    assert.equal(b.subcommand, "run");
+    const c = effectiveBrain({ model: "", effort: "", bin: "/usr/bin/muse" }, OC);
+    assert.equal(c.agent, "muse");
+    assert.equal(c.subcommand, "exec");
+  });
+  it("tanpa override → ikut env termasuk gaya lama -p", () => {
+    const b = effectiveBrain({ model: "", effort: "" }, { ...ENV, subcommand: "" });
+    assert.equal(b.agent, "muse");
+    assert.equal(b.bin, "muse");
+    assert.equal(b.subcommand, "");
+    assert.equal(b.agentSource, "env");
+  });
+  it("setBrainOverride agen mengubah spawn berikutnya (modul)", () => {
+    try {
+      setBrainOverride({ agent: "opencode", bin: "opencode" });
+      const b = effectiveBrain(undefined, ENV);
+      assert.equal(b.agent, "opencode");
+      assert.equal(b.subcommand, "run");
+      assert.deepEqual(brainArgs("KERJAKAN", b),
+        ["run", "--format", "json", "--auto", "--standalone", "KERJAKAN"]);
     } finally {
       setBrainOverride({ model: "", effort: "" });
     }
@@ -133,7 +185,28 @@ describe("migrasi state lama", () => {
     const p = join(dir, "state.json");
     writeFileSync(p, JSON.stringify({ version: 1, stack: [] }));
     const s = loadState(p);
-    assert.deepEqual(s.brain, { model: "", effort: "" });
+    assert.deepEqual(s.brain, { model: "", effort: "", bin: "", agent: "", subcommand: "" });
+  });
+  it("agen asing dibersihkan, field teks non-string dikosongkan", () => {
+    const dir = mkdtempSync(join(tmpdir(), "althea-brain-"));
+    const p = join(dir, "state.json");
+    writeFileSync(p, JSON.stringify({
+      version: 1, stack: [],
+      brain: { model: "m", effort: "high", bin: 42, agent: "claude", subcommand: null },
+    }));
+    const s = loadState(p);
+    assert.deepEqual(s.brain, { model: "m", effort: "high", bin: "", agent: "", subcommand: "" });
+  });
+  it("agen tersimpan valid dipertahankan", () => {
+    const dir = mkdtempSync(join(tmpdir(), "althea-brain-"));
+    const p = join(dir, "state.json");
+    writeFileSync(p, JSON.stringify({
+      version: 1, stack: [],
+      brain: { model: "", effort: "", bin: "opencode", agent: "opencode", subcommand: "" },
+    }));
+    const s = loadState(p);
+    assert.equal(s.brain.agent, "opencode");
+    assert.equal(s.brain.bin, "opencode");
   });
 });
 

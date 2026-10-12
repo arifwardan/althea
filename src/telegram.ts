@@ -77,8 +77,7 @@ export async function handleCommand(s: AltheaState, chatId: number, text: string
     case "/status": {
       const lines = [
         isSleeping(s) ? `Status: sleeping until ${s.sleepUntil}` : "Status: active",
-        ...(isSleeping(s) ? ["Wakes for: Telegram, approvals, resets"] : []),
-        ...(s.limitCooldownUntil ? [`Limit cooldown until: ${s.limitCooldownUntil}`] : []),
+        ...(isSleeping(s) ? ["Wakes for: Telegram messages and approvals"] : []),
         `Pending approvals: ${s.approvals.length}`,
         `Tasks on stack: ${s.stack.length}`,
       ];
@@ -92,7 +91,7 @@ export async function handleCommand(s: AltheaState, chatId: number, text: string
       const mnt = Number(rest[0]) || 60;
       const until = goSleep(s, mnt);
       save();
-      return `Sleeping for ${mnt} min (until ${until}).\nStill wakes for Telegram, approvals, and resets.`;
+      return `Sleeping for ${mnt} min (until ${until}).\nStill wakes for Telegram messages and approvals.`;
     }
     case "/wake":
       forceWake(s, "/wake command");

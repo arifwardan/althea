@@ -1,6 +1,6 @@
 # 🌙 Althea — Runtime Otonom (Laptop-first → VPS)
 
-Bahasa: Indonesia. Web-based. Otak: **Muse CLI** (langganan, reset ±5 jam).
+Bahasa: Indonesia. Web-based. Otak: **Muse CLI** (langganan).
 Backend satu dependensi kecil (`adm-zip`, untuk upload); dashboard Svelte (~110 KB total) tema dark navy + emerald.
 
 ## Stack: kenapa Node+TS (vs Go)
@@ -28,21 +28,23 @@ Dashboard memakai **Svelte 5 + Vite** (build statis ±100 KB, tanpa framework ru
 1. **Workflow dinamis (LIFO)** — `src/workflow.ts`. Puncak dikerjakan dulu;
    tugas/anak-tugas bisa di-`push` kapan saja (web/Telegram/Muse).
 2. **Mode tidur tapi tetap bangun** — `src/sleeper.ts`. `/tidur 60` hening 60 menit,
-   tapi otomatis bangun untuk: pesan Telegram, approval, timer reset limit, tugas prioritas.
-3. **Resume tiap reset ±5 jam tanpa prompt ulang** — `src/claude.ts` + `src/state.ts`.
-   Prompt tersimpan di `data/state.json`; limit → `queued` + cooldown → lanjut sendiri.
-4. **Deteksi limit token** — pola `usage limit / rate limit / quota / 429 / overloaded /
-   try again in …` pada **error asli CLI/API** (bukan jawaban AI) → notif Telegram +
-   cooldown (`retryAfter` bila ada, else +5 jam). Provider/model lain yang belum
-   limit tetap bisa dipakai: ganti model di dashboard lalu `/wake`.
+   tapi otomatis bangun untuk: pesan Telegram, approval, tugas baru.
+3. **Prompt tersimpan, siap jalan ulang** — `src/state.ts`. Tiap tugas menyimpan
+   prompt lengkapnya di `data/state.json`, jadi boot ulang tinggal lanjut.
+4. **Deteksi limit token (tanpa cooldown)** — pola `usage limit / rate limit / quota /
+   429 / overloaded / try again in …` pada **error asli CLI/API** (bukan jawaban AI)
+   → tugas langsung `failed` + notif Telegram. Tanpa tunggu otomatis: ganti ke
+   model/provider yang masih ada kuotanya, lalu jalankan ulang tugasnya.
 5. **Kill-switch** — tombol [hentikan] di dashboard / `/batal <id>` di Telegram
    mematikan proses Muse detik itu juga (SIGTERM → SIGKILL).
+   Tombol **[correct]** di panel running_task: menghentikan run, menempelkan
+   arahan admin ke prompt, lalu mengantre ulang tugas yang sama.
 6. **Log live + review code** — output Muse mengalir ke dashboard (SSE, tersimpan
    200 baris/tugas); panel review menampilkan `git diff` project, pohon file,
    dan isi file untuk diperiksa.
 7. **Agen LangGraph** — tiap tugas jalan sebagai graph plan → implement → review
    (loop fix maks `GRAPH_MAX_ROUNDS`, default 3). Tiap node memanggil Muse CLI
-   langganan (tanpa API key); limit/kill-switch/resume tetap lewat jalur yang sama.
+   langganan (tanpa API key); limit menggagalkan tugas, kill-switch tetap sama.
 8. **Hitung token (estimasi jujur)** — CLI langganan tak melaporkan pemakaian dan
    Anthropic tak mempublikasikan tokenizer Muse, jadi Althea menghitung karakter
    pasti + estimasi token (≈3,5 char/token). Tampil per tugas, total di laporan,
@@ -107,8 +109,8 @@ sukses/gagal) di bawah barisnya. Server kustom bisa didaftarkan via
 iframe. Tiap preview dapat **port dan origin sendiri** (9001–9090,
 `PREVIEW_BASE_PORT`) sehingga path absolut, fetch, module script, dan storage
 app modern (Next/Vite) tetap jalan. Project HTML statis disajikan otomatis
-dari portnya; stack `node` default `npm run dev` (env `PORT`/`HOST`/`HOSTNAME`
-diset), `python` default `http.server`, sisanya isi command sendiri (`{port}`
+dari portnya; stack `node` default `<runner> run dev` (runner = env `JS_RUNNER`
+`npm`/`bun`; env `PORT`/`HOST`/`HOSTNAME` diset), `python` default `http.server`, sisanya isi command sendiri (`{port}`
 diganti otomatis, tersimpan per project). Proses dibatasi 8, log 200 baris,
 dan semua preview dimatikan saat project dihapus / server berhenti. Iframe
 di-sandbox (`allow-same-origin` sebatas origin preview itu sendiri) sehingga
@@ -140,12 +142,12 @@ root Althea). Tanpa project = perilaku lama (cwd root Althea).
 ## Struktur
 
 ```
-src/index.ts      loop runtime hidup (telegram→eskalasi→approval→tidur→limit→kerja)
+src/index.ts      loop runtime hidup (telegram→eskalasi→approval→tidur→kerja)
 src/workflow.ts   stack dinamis push/peek/done + approval
 src/escalation.ts aturan 3+3 menit + keputusan otomatis
 src/auth.ts       sesi login + rate-limit
 src/sleeper.ts    tidur yang bisa dibangunkan 5 pemicu
-src/claude.ts     wrapper `muse exec` + model/effort + deteksi limit + resume reset
+src/claude.ts     wrapper `muse exec` + model/effort + deteksi limit (tanpa cooldown)
 src/telegram.ts   bot long-poll: notif, perintah, tombol izin
 src/report.ts     laporan ringkas
 src/agent/graph.ts LangGraph plan→implement→review di atas CLI langganan

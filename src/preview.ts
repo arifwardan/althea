@@ -10,6 +10,7 @@ import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from "n
 import { join, resolve, sep, normalize, extname } from "node:path";
 import { connect, createServer as createNetServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
+import { config, normalizeJsRunner, DEFAULT_PREVIEW_BASE_PORT } from "./config.js";
 
 /** Apakah folder layak preview statis (HTML polos tanpa server). */
 export function isStaticDir(dir: string): boolean {
@@ -39,18 +40,20 @@ export function isMonorepo(dir: string): boolean {
 
 /**
  * Command default per stack. {port} diganti port alokasi. null = wajib isi manual.
- * Kebijakan: folder dengan «dev» script (termasuk monorepo — «npm run dev»
+ * Kebijakan: folder dengan «dev» script (termasuk monorepo — dev script
  * di root menjalankan semua app sekaligus, masing-masing di portnya sendiri)
- * mendapat default «npm run dev». Laravel standar → lerd (bukan spawn).
+ * mendapat default «<runner> run dev» (runner = JS_RUNNER npm|bun).
+ * Laravel standar → lerd (bukan spawn).
  */
-export function defaultCommand(stack: string, dir?: string): string | null {
+export function defaultCommand(stack: string, dir?: string, runner: unknown = config.jsRunner): string | null {
+  const dev = `${normalizeJsRunner(runner)} run dev`;
   if (!dir) {
-    if (stack === "node") return "npm run dev";
+    if (stack === "node") return dev;
     if (stack === "python") return "python3 -m http.server {port} --bind 127.0.0.1";
     return null;
   }
   if (isStandardStack(dir)) return null; // Laravel standar via lerd, bukan spawn
-  if (readDevScript(dir)) return "npm run dev";
+  if (readDevScript(dir)) return dev;
   if (stack === "python" && existsSync(join(dir, "manage.py"))) {
     return "python3 manage.py runserver 127.0.0.1:{port}";
   }
@@ -58,10 +61,10 @@ export function defaultCommand(stack: string, dir?: string): string | null {
   return null; // tanpa petunjuk dev → isi manual
 }
 
-export function resolveCommand(stack: string, override?: string, dir?: string): string {
+export function resolveCommand(stack: string, override?: string, dir?: string, runner?: unknown): string {
   const o = (override || "").trim().slice(0, 500);
   if (o) return o;
-  return defaultCommand(stack, dir) || "";
+  return defaultCommand(stack, dir, runner) || "";
 }
 
 /** Stack standar Althea: aplikasi Laravel (disajikan via lerd sebagai namaproject.test). */
@@ -399,8 +402,7 @@ interface Rec {
   logs: string[];
 }
 
-/** Port awal alokasi preview (satu port per preview yang jalan, 9001–9090). */
-export const DEFAULT_PREVIEW_BASE_PORT = 9001;
+/** Port awal alokasi preview, dari config (satu port per preview, 9001–9090). */
 
 export interface PreviewManagerOpts {
   basePort?: number;

@@ -267,7 +267,7 @@ export function resumePipeline(s: AltheaState, project: string): StackTask | nul
   pipe.note = undefined;
   pipe.updatedAt = new Date().toISOString();
   const active = s.stack.some((t) =>
-    t.project === project && t.phase && ["queued", "running", "waiting_approval", "waiting_quota"].includes(t.status));
+    t.project === project && t.phase && ["queued", "running", "waiting_approval"].includes(t.status));
   if (active) {
     logEvent(s, `pipeline ${project} resumed`);
     return null;

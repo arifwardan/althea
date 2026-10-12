@@ -23,8 +23,9 @@ import {
   resolvePreviewPath, isStaticDir, createPreviewManager, previewUrlFor,
   tabUrlFor, portCandidates, pickPort,
   isMonorepo, previewNote, isStandardStack, previewKind, siteDomain, siteUrl,
-  linkSite, lerdAvailable, DEFAULT_PREVIEW_BASE_PORT,
+  linkSite, lerdAvailable,
 } from "../src/preview.js";
+import { DEFAULT_PREVIEW_BASE_PORT } from "../src/config.js";
 
 const tmp = (files = {}) => {
   const d = mkdtempSync(path.join(tmpdir(), "althea-pv-"));
@@ -38,13 +39,21 @@ const tmp = (files = {}) => {
 
 describe("command", () => {
   it("default per stack; override menang; kosong bila tak ada default", () => {
-    assert.equal(defaultCommand("node"), "npm run dev");
+    // Runner eksplisit agar tak ikut .env lokal (JS_RUNNER).
+    assert.equal(defaultCommand("node", undefined, "npm"), "npm run dev");
     assert.match(defaultCommand("python") || "", /{port}/);
     assert.equal(defaultCommand("go"), null);
     assert.equal(defaultCommand("generic"), null);
     assert.equal(resolveCommand("go", "go run . --port {port}"), "go run . --port {port}");
-    assert.equal(resolveCommand("node", ""), "npm run dev");
+    assert.equal(resolveCommand("node", "", undefined, "npm"), "npm run dev");
     assert.equal(resolveCommand("go", "   "), "");
+  });
+  it("runner bun → default 'bun run dev'; asing → fallback npm", () => {
+    assert.equal(defaultCommand("node", undefined, "bun"), "bun run dev");
+    assert.equal(resolveCommand("node", "", undefined, "bun"), "bun run dev");
+    assert.equal(defaultCommand("node", undefined, "pnpm"), "npm run dev");
+    const vite = tmp({ "package.json": JSON.stringify({ scripts: { dev: "vite" } }) });
+    assert.equal(defaultCommand("node", vite, "bun"), "bun run dev");
   });
   it("splitCmd menghormati kutip", () => {
     assert.deepEqual(splitCmd(`node server.js --port 9111`), ["node", "server.js", "--port", "9111"]);
@@ -67,7 +76,7 @@ describe("command", () => {
   });
   it("non-standar: dev script → default server; tanpa petunjuk → manual", () => {
     const vite = tmp({ "package.json": JSON.stringify({ scripts: { dev: "vite" } }) });
-    assert.equal(defaultCommand("node", vite), "npm run dev");
+    assert.equal(defaultCommand("node", vite, "npm"), "npm run dev");
     assert.equal(previewKind("node", vite, false), "server");
     assert.equal(previewNote("node", vite), null);
     const dj = tmp({ "manage.py": "x", "requirements.txt": "Django" });

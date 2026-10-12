@@ -54,6 +54,7 @@ export const STACK_OPTIONS: Record<keyof StackSpec, Array<{ id: string; label: s
   be: [
     { id: "laravel", label: "Laravel (default — preview via lerd)" },
     { id: "node", label: "Node.js" },
+    { id: "elysia", label: "ElysiaJS (Bun — preview via dev server)" },
     { id: "python", label: "Python" },
     { id: "go", label: "Go" },
   ],
@@ -81,6 +82,7 @@ const STACK_IDS: Record<keyof StackSpec, string[]> = {
 /** Petakan string stack lama ("laravel"|"node"|...) ke spec per lapisan. */
 function legacyStackString(t: string): StackSpec {
   if (t === "node") return { ...DEFAULT_STACK, be: "node" };
+  if (t === "elysia") return { ...DEFAULT_STACK, be: "elysia" };
   if (t === "python") return { ...DEFAULT_STACK, be: "python" };
   if (t === "go") return { ...DEFAULT_STACK, be: "go" };
   return { ...DEFAULT_STACK };
@@ -91,7 +93,7 @@ export function normalizeStackSpec(v: unknown): StackSpec {
   if (typeof v === "string") {
     const t = v.trim().toLowerCase();
     if (!t) return { ...DEFAULT_STACK };
-    if (["laravel", "node", "python", "go", "generic"].includes(t)) return legacyStackString(t);
+    if (["laravel", "node", "elysia", "python", "go", "generic"].includes(t)) return legacyStackString(t);
     return { ...DEFAULT_STACK };
   }
   const o = (v && typeof v === "object" ? v : {}) as Partial<StackSpec>;
@@ -118,7 +120,7 @@ export function isPreviewStack(v: unknown): boolean {
 
 const STACK_LABEL: Record<string, string> = {
   svelte: "Svelte", react: "React", vue: "Vue", blade: "Blade",
-  laravel: "Laravel", node: "Node.js", python: "Python", go: "Go",
+  laravel: "Laravel", node: "Node.js", elysia: "ElysiaJS", python: "Python", go: "Go",
   postgresql: "PostgreSQL", mysql: "MySQL", sqlite: "SQLite", none: "no DB",
   tailwind: "Tailwind", "tailwind-shadcn": "Tailwind+shadcn/ui", bootstrap: "Bootstrap", plain: "Plain CSS",
 };

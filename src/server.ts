@@ -6,10 +6,10 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import type { AltheaState } from "./state.js";
 import { config } from "./config.js";
-import { pushTask, pushFollowup, resolveApproval, cancelTask } from "./workflow.js";
+import { pushTask, pushFollowup, resolveApproval, cancelTask, correctTask, deleteTask, requeueTask } from "./workflow.js";
 import {
   killRunning, setBrainOverride, effectiveBrain, listBrainModels,
-  normalizeEffort, normalizeModel, BRAIN_EFFORTS,
+  normalizeEffort, normalizeModel, normalizeBin, normalizeAgent, BRAIN_EFFORTS,
   setTimeoutOverride, effectiveTimeoutSeconds, parseTimeoutSeconds,
   TIMEOUT_MIN_SECONDS, TIMEOUT_MAX_SECONDS, TIMEOUT_DEFAULT_SECONDS,
 } from "./claude.js";
@@ -222,7 +222,7 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
   const haltPreview = () => preview.stopAll();
   process.on("SIGINT", haltPreview);
   process.on("SIGTERM", haltPreview);
-  setBrainOverride({ model: s.brain?.model, effort: s.brain?.effort }); // override dashboard dari state
+  setBrainOverride({ model: s.brain?.model, effort: s.brain?.effort, bin: s.brain?.bin, agent: s.brain?.agent, subcommand: s.brain?.subcommand }); // override dashboard dari state
   setTimeoutOverride(s.limits?.timeoutSeconds); // override timeout dashboard dari state
   const authRequired = config.adminPassword.length > 0;
   const sessionTtlMs = config.sessionDays * 86_400_000;
@@ -319,7 +319,7 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         return json(res, { ...effectiveBrain(), efforts: BRAIN_EFFORTS, catalog: listBrainModels() });
       }
       if (req.method === "PUT" && path === "/api/brain") {
-        const { model, effort } = JSON.parse((await body(req)) || "{}");
+        const { model, effort, bin, agent } = JSON.parse((await body(req)) || "{}");
         // Absen = pertahankan; string kosong = kembali ke default env/CLI.
         if (model !== undefined && typeof model !== "string") {
           return json(res, { error: "model must be a string" }, 400);
@@ -331,12 +331,25 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
             normalizeEffort(effort) === "") {
           return json(res, { error: `unknown effort (pick: ${BRAIN_EFFORTS.join("|")})` }, 400);
         }
+        if (bin !== undefined && typeof bin !== "string") {
+          return json(res, { error: "bin must be a string" }, 400);
+        }
+        if (agent !== undefined && typeof agent !== "string") {
+          return json(res, { error: "agent must be a string" }, 400);
+        }
+        if (agent !== undefined && String(agent).trim() !== "" &&
+            normalizeAgent(agent) === "") {
+          return json(res, { error: "unknown agent (pick: muse|opencode)" }, 400);
+        }
         if (model !== undefined) s.brain.model = normalizeModel(model);
         if (effort !== undefined) s.brain.effort = normalizeEffort(effort);
-        setBrainOverride({ model: s.brain.model, effort: s.brain.effort });
-        logEvent(s, `brain ← dashboard: model=${s.brain.model || "default"} effort=${s.brain.effort || "default"}`);
+        if (bin !== undefined) s.brain.bin = normalizeBin(bin);
+        if (agent !== undefined) s.brain.agent = normalizeAgent(agent);
+        setBrainOverride({ model: s.brain.model, effort: s.brain.effort, bin: s.brain.bin, agent: s.brain.agent });
+        const b = effectiveBrain();
+        logEvent(s, `brain ← dashboard: ${b.agent} ${b.bin}${b.subcommand ? " " + b.subcommand : ""} model=${b.model || "default"} effort=${b.effort || "default"}`);
         save();
-        return json(res, { ok: true, brain: effectiveBrain(), applies: "next-spawn" });
+        return json(res, { ok: true, brain: b, applies: "next-spawn" });
       }
       if (req.method === "GET" && path === "/api/limits") {
         const t = effectiveTimeoutSeconds();
@@ -604,6 +617,40 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
           pipelineOnCancel(s, id); // tugas fase → pipeline ikut jeda
           forceWake(s, `cancel ${id}`);
         }
+        save();
+        return json(res, { ok });
+      }
+      if (req.method === "DELETE" && path.startsWith("/api/tasks/")) {
+        const id = decodeURIComponent(path.slice("/api/tasks/".length));
+        if (!id || id.includes("/")) return json(res, { error: "bad task id" }, 400);
+        const t = s.stack.find((x) => x.id === id);
+        if (!t) return json(res, { ok: false, error: "no such task" }, 404);
+        if (t.status === "running") killRunning(); // hentikan proses bila yang berjalan
+        pipelineOnCancel(s, id); // sebelum dihapus: tugas fase → pipeline ikut jeda
+        const ok = deleteTask(s, id);
+        if (ok) forceWake(s, `delete ${id}`);
+        save();
+        return json(res, { ok });
+      }
+      if (req.method === "POST" && path.startsWith("/api/tasks/") && path.endsWith("/correct")) {
+        const id = decodeURIComponent(path.slice("/api/tasks/".length, -"/correct".length));
+        const { correction } = JSON.parse((await body(req)) || "{}");
+        if (!String(correction || "").trim()) return json(res, { error: "correction is required" }, 400);
+        const t = s.stack.find((x) => x.id === id);
+        if (!t) return json(res, { ok: false, error: "no such task" }, 404);
+        if (t.status === "running") killRunning(); // hentikan run agar arahan baru dipakai
+        const ok = correctTask(s, id, String(correction));
+        if (ok) forceWake(s, `correct ${id}`);
+        save();
+        return json(res, { ok });
+      }
+      if (req.method === "POST" && path.startsWith("/api/tasks/") && path.endsWith("/rerun")) {
+        const id = decodeURIComponent(path.slice("/api/tasks/".length, -"/rerun".length));
+        const t = s.stack.find((x) => x.id === id);
+        if (!t) return json(res, { ok: false, error: "no such task" }, 404);
+        const ok = requeueTask(s, id);
+        if (!ok) return json(res, { ok: false, error: "only done/failed tasks can be re-run" }, 400);
+        forceWake(s, `rerun ${id}`);
         save();
         return json(res, { ok });
       }

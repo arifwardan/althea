@@ -1,10 +1,12 @@
-// Verifier deterministik (FR-3.10): skrip npm project (check/test/build)
-// dijalankan sistem lokal setelah implementasi. 0 token LLM; gagal = feedback
-// ronde berikutnya (tanpa memanggil model). Aman: hanya skrip yang ADA di
-// package.json yang dijalankan; tanpa package.json dilewati.
+// Verifier deterministik (FR-3.10): skrip JS project (check/test/build)
+// dijalankan sistem lokal setelah implementasi via runner JS_RUNNER
+// (npm|bun). 0 token LLM; gagal = feedback ronde berikutnya (tanpa memanggil
+// model). Aman: hanya skrip yang ADA di package.json yang dijalankan;
+// tanpa package.json dilewati.
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { config, normalizeJsRunner } from "./config.js";
 
 export interface VerifyStep {
   script: string;
@@ -39,9 +41,12 @@ export type RunCmd = (
   script: string, cwd: string, timeoutMs: number,
 ) => Promise<{ code: number; output: string }>;
 
-export function realRunCmd(script: string, cwd: string, timeoutMs: number): Promise<{ code: number; output: string }> {
+export function realRunCmd(
+  script: string, cwd: string, timeoutMs: number, runner: unknown = config.jsRunner,
+): Promise<{ code: number; output: string }> {
+  const r = normalizeJsRunner(runner);
   return new Promise((resolve) => {
-    execFile("npm", ["run", script], { cwd, timeout: timeoutMs, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
+    execFile(r, ["run", script], { cwd, timeout: timeoutMs, maxBuffer: 512 * 1024 }, (err, stdout, stderr) => {
       const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code?: unknown }).code as number) : 1) : 0;
       resolve({ code, output: String(stdout || stderr || "").slice(-2000) });
     });
@@ -51,7 +56,9 @@ export function realRunCmd(script: string, cwd: string, timeoutMs: number): Prom
 /** Jalankan skrip berurutan; berhenti di kegagalan pertama. */
 export async function runVerifyGates(
   cwd: string, scripts: string[], timeoutMs: number, run: RunCmd = realRunCmd,
+  runner: unknown = config.jsRunner,
 ): Promise<VerifyResult> {
+  const tag = `${normalizeJsRunner(runner)} run`;
   const avail = pkgScripts(cwd);
   if (!avail) return { ok: true, ran: 0, summary: "verifier skipped (no package.json)", steps: [] };
   const steps: VerifyStep[] = [];
@@ -69,7 +76,7 @@ export async function runVerifyGates(
       return {
         ok: false,
         ran: steps.filter((x) => !x.skipped).length,
-        summary: `verifier failed at "npm run ${s}":\n${output}`.slice(0, 2000),
+        summary: `verifier failed at "${tag} ${s}":\n${output}`.slice(0, 2000),
         steps,
       };
     }

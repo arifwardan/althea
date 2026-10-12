@@ -1,14 +1,14 @@
 // Agen LangGraph di atas Muse CLI langganan (tanpa API key).
 // Topologi: plan → implement → review → (approve | fix→implement, maks N ronde).
-// Tiap node = satu panggilan CLI; limit/kill di dilempar sebagai sinyal agar
-// loop utama menangani via jalur cooldown & kill-switch yang sudah ada.
+// Tiap node = satu panggilan CLI; limit/kill dilempar sebagai sinyal agar
+// loop utama menanganinya (limit = gagalkan tugas, kill = kill-switch).
 import { StateGraph, START, END, Annotation } from "@langchain/langgraph";
 import { runClaude, type ClaudeResult } from "../claude.js";
 import { contextTree, projectDiff, readStandards, prdSlice } from "../projects.js";
 import { runVerifyGates } from "../verify.js";
 import type { StackTask } from "../state.js";
 
-/** Limit kuota di tengah graph → driver wajib cooldown + simpan progres. */
+/** Limit kuota di tengah graph → driver menggagalkan tugas (progres aman di task.graph). */
 export class LimitSignal extends Error {
   retryAfterMs: number | null;
   constructor(retryAfterMs: number | null) {

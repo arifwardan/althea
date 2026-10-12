@@ -5,7 +5,7 @@ import { runGraphTask, parseReview, buildSlicePlan, runGateReview, buildImplemen
 import type { ClaudeResult } from "../src/claude.js";
 import { defaultState } from "../src/state.js";
 import { pushTask } from "../src/workflow.js";
-import { config } from "../src/config.js";
+import { config, normalizeJsRunner } from "../src/config.js";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -245,9 +245,10 @@ describe("FR-3.11 + FR-3.8: STANDARDS dan potongan PRD disuntik", () => {
 describe("FR-3.10: verifier sebagai hard gate", () => {
   let tmp = "";
   let prevWs = "";
-  const npmOk = (() => {
+  // Mengikuti runner terkonfigurasi (JS_RUNNER npm|bun), bukan npm mentah.
+  const runnerOk = (() => {
     try {
-      execFileSync("npm", ["--version"], { stdio: "ignore" });
+      execFileSync(normalizeJsRunner(config.jsRunner), ["--version"], { stdio: "ignore" });
       return true;
     } catch {
       return false;
@@ -265,7 +266,7 @@ describe("FR-3.10: verifier sebagai hard gate", () => {
   });
 
   it("check lolos → approve + ada output [verify]", async (t) => {
-    if (!npmOk) t.skip("npm tak tersedia");
+    if (!runnerOk) t.skip("JS runner tak tersedia");
     writeFileSync(join(tmp, "kasir", "package.json"), JSON.stringify({
       scripts: { check: 'node -e "process.exit(0)"' },
     }));
@@ -284,7 +285,7 @@ describe("FR-3.10: verifier sebagai hard gate", () => {
   });
 
   it("check gagal → tak lolos tanpa bakar review LLM", async (t) => {
-    if (!npmOk) t.skip("npm tak tersedia");
+    if (!runnerOk) t.skip("JS runner tak tersedia");
     writeFileSync(join(tmp, "kasir", "package.json"), JSON.stringify({
       scripts: { check: 'node -e "process.exit(1)"' },
     }));
@@ -303,7 +304,7 @@ describe("FR-3.10: verifier sebagai hard gate", () => {
   });
 
   it("ringkasan verifier diteruskan ke prompt reviewer LLM", async (t) => {
-    if (!npmOk) t.skip("npm tak tersedia");
+    if (!runnerOk) t.skip("JS runner tak tersedia");
     writeFileSync(join(tmp, "kasir", "package.json"), JSON.stringify({
       scripts: { check: 'node -e "process.exit(0)"' },
     }));

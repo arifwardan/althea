@@ -1,5 +1,6 @@
-// State persisten (JSON). Kunci auto-lanjut tanpa prompt ulang:
-// setiap tugas menyimpan prompt-nya, jadi boot / reset 5 jam tinggal lanjut.
+// State persisten (JSON). Setiap tugas menyimpan prompt-nya,
+// jadi boot ulang tinggal lanjut tanpa prompt ulang. Tanpa cooldown kuota:
+// limit provider langsung menggagalkan tugas (lihat claude.ts).
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { emptyUsage, type Usage } from "./tokens.js";
@@ -8,20 +9,11 @@ export type TaskStatus =
   | "queued"
   | "running"
   | "waiting_approval"
-  | "waiting_quota"
   | "sleeping"
   | "done"
   | "failed";
 
-/** Satu episode limit kuota (FR-4.4): kapan kena, kapan lanjut, durasi jeda. */
-export interface QuotaEvent {
-  taskId: string;
-  title: string;
-  hitAt: string; // kapan limit terdeteksi
-  resumeAt: string | null; // kapan selesai menunggu (resume/batal), null = masih menunggu
-  waitMs: number | null; // durasi jeda, diisi saat resumeAt diset
-  until: string; // estimasi reset saat limit terdeteksi (FR-4.1)
-}
+
 
 export interface GraphProgress {
   plan?: string;
@@ -90,6 +82,9 @@ export interface Approval {
 export interface BrainSetting {
   model: string; // "" = ikut default env/CLI
   effort: string; // "" = ikut default env/CLI
+  bin: string; // "" = ikut env (BRAIN_BIN)
+  agent: string; // "" = ikut env/tebakan, else "muse" | "opencode"
+  subcommand: string; // "" = default per agen (exec/run) atau env bila dashboard tak campur
 }
 
 export interface LimitsSetting {
@@ -116,9 +111,6 @@ export interface AltheaState {
   activity: Record<string, TaskActivity[]>; // taskId → feed aktivitas (maks 5 tugas × 120)
   usage: Usage; // total pemakaian runtime ini
   sleepUntil: string | null; // ISO atau null
-  limitCooldownUntil: string | null; // ISO: kapan boleh coba Muse lagi setelah limit
-  lastReset: string | null;
-  quotaHistory: QuotaEvent[]; // riwayat limit→resume (FR-4.4, maks 50 terakhir)
   events: string[]; // log ringkas (maks 200)
   bootedAt: string;
 }
@@ -126,7 +118,7 @@ export interface AltheaState {
 export function defaultState(): AltheaState {
   return {
     version: 1,
-    brain: { model: "", effort: "" },
+    brain: { model: "", effort: "", bin: "", agent: "", subcommand: "" },
     limits: { timeoutSeconds: 0 },
     stack: [],
     approvals: [],
@@ -135,9 +127,6 @@ export function defaultState(): AltheaState {
     activity: {},
     usage: emptyUsage(),
     sleepUntil: null,
-    limitCooldownUntil: null,
-    lastReset: null,
-    quotaHistory: [],
     events: [],
     bootedAt: new Date().toISOString(),
   };
@@ -158,17 +147,30 @@ export function loadState(path: string): AltheaState {
     if (!s.logs || typeof s.logs !== "object") s.logs = {};
     if (!s.activity || typeof s.activity !== "object") s.activity = {};
     if (!s.usage || typeof s.usage !== "object") s.usage = emptyUsage();
-    if (!s.brain || typeof s.brain !== "object") s.brain = { model: "", effort: "" };
+    if (!s.brain || typeof s.brain !== "object") s.brain = { model: "", effort: "", bin: "", agent: "", subcommand: "" };
     if (typeof s.brain.model !== "string") s.brain.model = "";
     if (typeof s.brain.effort !== "string") s.brain.effort = "";
+    // Migrasi: state lama belum punya pilihan agen dashboard.
+    if (typeof s.brain.bin !== "string") s.brain.bin = "";
+    if (s.brain.agent !== "muse" && s.brain.agent !== "opencode") s.brain.agent = "";
+    if (typeof s.brain.subcommand !== "string") s.brain.subcommand = "";
     // Migrasi: state lama belum punya override batas eksekusi.
     if (!s.limits || typeof s.limits !== "object") s.limits = { timeoutSeconds: 0 };
     if (!Number.isFinite(s.limits.timeoutSeconds) || (s.limits.timeoutSeconds as number) < 0) {
       s.limits.timeoutSeconds = 0;
     }
     if (!Array.isArray(s.events)) s.events = [];
-    // Migrasi: state lama belum punya riwayat kuota (FR-4.4).
-    if (!Array.isArray(s.quotaHistory)) s.quotaHistory = [];
+    // Migrasi: cooldown kuota dihapus — tugas lama berstatus waiting_quota
+    // langsung antre lagi (tak ada penahanan), sisa field kuota dibuang.
+    for (const t of s.stack) {
+      if ((t as { status?: string }).status === "waiting_quota") {
+        t.status = "queued";
+        t.updatedAt = new Date().toISOString();
+      }
+    }
+    for (const k of ["limitCooldownUntil", "lastReset", "quotaHistory"] as const) {
+      delete (s as unknown as Record<string, unknown>)[k];
+    }
     // Migrasi: project lama belum punya MCP / previewCmd / stackSpec / categories.
     // (Struktural saja di sini agar tak ada import siklik ke projects.ts;
     // normalisasi kanonis ada di normalizeStackSpec/normalizeCategories.)

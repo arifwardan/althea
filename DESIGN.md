@@ -7,12 +7,12 @@ Bahasa: Indonesia. Pasangan dari [PRD.md](/mnt/c/ai/playground/althea/PRD.md). I
 Satu proses Node, nol dependensi runtime. Semua modul di `src/`:
 
 ```
-index.ts      loop tick: telegram → eskalasi → approval? → tidur? → limit? → kerja
+index.ts      loop tick: telegram → eskalasi → approval? → tidur? → kerja
 workflow.ts   stack LIFO: push / peek / done / failed / approval
 escalation.ts aturan 3+3 menit + keputusan otomatis (murni waktu → unit-test)
 auth.ts       sesi login + rate-limit (tanpa framework)
 state.ts      JSON persisten (data/state.json) = memori auto-lanjut
-claude.ts     spawn `muse exec` (+ model/effort) + deteksi limit + cooldown resume
+claude.ts     spawn `muse exec` (+ model/effort) + deteksi limit (tanpa cooldown)
 sleeper.ts    mode tidur + 5 pemicu bangun
 telegram.ts   long-poll bot: notif, perintah, tombol izin
 report.ts     laporan teks ringkas (dipakai web + Telegram)
@@ -28,23 +28,22 @@ dikompilasi jadi statis ±100 KB (JS+CSS+font) lalu disajikan backend http bawaa
 
 Setiap `LOOP_SECONDS` (default 15 dtk):
 
-1. **Poll Telegram** — selalu jalan duluan, supaya `/bangun` dan tombol izin responsif walau runtime tidur/cooldown.
+1. **Poll Telegram** — selalu jalan duluan, supaya `/bangun` dan tombol izin responsif walau runtime tidur.
 2. **Eskalasi izin** — `processEscalations`: approval stage `web` yang berumur > N menit naik ke `telegram` (kirim tombol + batas waktu); stage `telegram` yang berumur > M menit diputuskan otomatis (non-destruktif = setuju, destruktif = tolak) lalu dinotifikasi. Nonaktif via `APPROVAL_AUTODECIDE=0`.
 3. **Approval pending?** — jika `state.approvals` tidak kosong, berhenti di sini. Tidak ada tugas lain yang dikerjakan sampai admin/auto memutuskan.
 4. **Tidur?** — jika `sleepUntil` belum lewat, skip eksekusi Muse (hemat kuota).
-5. **Cooldown limit?** — jika `limitCooldownUntil` belum lewat, skip. Saat lewat, flag di-reset + event `resume otomatis` dicatat.
-6. **Kerja** — ambil puncak stack (`peek`), jalankan graph LangGraph
+5. **Kerja** — ambil puncak stack (`peek`), jalankan graph LangGraph
    (`src/agent/graph.ts`, lazy-import): node `planner` → `coder` → `reviewer`;
    tiap node satu panggilan `muse exec` (+ `--model`/`--reasoning-effort`
    dari dashboard bila diset), fix loop maks `GRAPH_MAX_ROUNDS`.
-   Progres graph tersimpan di `task.graph` agar limit/restart/resume tak mengulang.
-   - limit di node mana pun → tugas kembali `queued` + cooldown (progres aman).
+   Progres graph tersimpan di `task.graph` agar restart tak mengulang.
+   - limit di node mana pun → tugas langsung `failed` + notif (tanpa cooldown).
    - output gabungan mengandung `IZIN: ...` → `waiting_approval` (eskalasi langkah 2).
    - review APPROVED → `done`; ronde habis → `failed` + notif Telegram.
    - `GRAPH_ENABLED=0` = mode single-shot lama (satu panggilan CLI).
 7. **Laporan berkala** — tiap `REPORT_EVERY_HOURS` kirim ringkasan ke Telegram (0 = mati).
 
-Kunci auto-lanjut tanpa prompt ulang: **prompt lengkap tersimpan per tugas di `state.json`**, jadi limit / restart / tidur tidak pernah menghilangkan konteks. Boot ulang tinggal `peek` dan lanjut.
+Kunci jalan-ulang tanpa prompt ulang: **prompt lengkap tersimpan per tugas di `state.json`**, jadi gagal / restart / tidur tidak pernah menghilangkan konteks. Boot ulang tinggal `peek` dan lanjut.
 
 ## 3. API web (dashboard)
 
@@ -68,6 +67,9 @@ Kunci auto-lanjut tanpa prompt ulang: **prompt lengkap tersimpan per tugas di `s
 | GET | `/api/brain` | Otak efektif: bin, model, effort + sumbernya | Ya |
 | PUT | `/api/brain` | `{model, effort}` → simpan override, berlaku spawn berikut | Ya |
 | POST | `/api/tasks/:id/cancel` | Kill-switch: matikan proses + gagalkan tugas | Ya |
+| POST | `/api/tasks/:id/correct` | `{correction}` → hentikan run + tempel arahan ke prompt + antre ulang | Ya |
+| DELETE | `/api/tasks/:id` | Hapus tugas permanen (proses dimatikan, pipeline fase ikut jeda) | Ya |
+| POST | `/api/tasks/:id/rerun` | Tugas done/failed → queued lagi tanpa ubah prompt | Ya |
 | GET | `/api/tasks/:id/log` | SSE log output Muse (200 baris terakhir) | Ya |
 | GET | `/api/projects/:n/diff` | Git diff + status untracked (100 KB) | Ya |
 | GET | `/api/projects/:n/files` | Pohon file (200 entri, skip berat) | Ya |
@@ -87,7 +89,7 @@ Perintah: `/status /stack /lapor /tidur <mnt> /bangun /tambah Judul|prompt /setu
 
 Flow izin: Muse mencetak `IZIN: <pertanyaan>` → muncul di web (stage `web`); tanpa respons N menit → bot kirim pesan + tombol inline (`ok:<id>` / `no:<id>`) + info batas waktu; tanpa respons M menit lagi → keputusan otomatis (non-destruktif = setuju → `queued`, destruktif = tolak → `failed`) + notifikasi. Semua keputusan tercatat di `events` (audit) beserta pengambilnya.
 
-Bangun saat tidur dipicu oleh: pesan Telegram, approval baru/selesai, timer reset tiba, tugas prioritas, perintah manual.
+Bangun saat tidur dipicu oleh: pesan Telegram, approval baru/selesai, tugas baru, perintah manual.
 
 ## 5. Format state (`data/state.json`)
 
@@ -99,19 +101,17 @@ Bangun saat tidur dipicu oleh: pesan Telegram, approval baru/selesai, timer rese
   "usage": {"runs":10,"charsIn":5000,"charsOut":6000,"tokIn":1429,"tokOut":1715}, // total runtime (estimasi)
   "approvals": [{ "id": "t_...", "title": "...", "question": "...", "createdAt": "..." }],
   "sleepUntil": "ISO|null",
-  "limitCooldownUntil": "ISO|null",
-  "lastReset": "ISO|null",
   "events": ["ISO pesan ..."] // maks 200
 }
 ```
 
 File ini adalah satu-satunya database di MVP (cukup untuk solo builder; SQLite/Postgres opsional nanti).
 
-## 6. Strategi limit ±5 jam
+## 6. Strategi limit (tanpa cooldown)
 
 - Deteksi: pola `usage limit / rate limit / quota / 429 / overloaded / try again in / reset at|in / limit reached` (case-insensitive) pada **teks error asli CLI/API** (baris non-JSON stdout/stderr, event `error` opencode, `task.lifecycle.failed` muse). Jawaban AI hanya diperiksa bila exit ≠ 0 — sebutan "quota" dalam prose normal bukan limit.
-- Tunggu eksplisit: `try again in N detik|menit|jam` → cooldown tepat N. Tanpa itu → +5 jam (konfigurasi `CLAUDE_RESET_HOURS`).
-- Resume: otomatis di tick berikutnya setelah cooldown lewat — prompt diambil dari state, bukan dari ketikan ulang.
+- Tindak: tugas langsung `failed` + notif Telegram (tak ada tunggu otomatis). Saran `try again in N …` dari provider ikut di pesan bila ada.
+- Jalan ulang: prompt tersimpan di state — ganti ke model/provider yang masih ada kuotanya, lalu jalankan ulang tugasnya.
 - Risiko: format pesan limit berubah → ada pola ganda + fallback keyword; probe manual via `/bangun`.
 
 ## 7. Workspace projects
