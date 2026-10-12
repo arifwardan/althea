@@ -2,7 +2,7 @@
 // Jalankan: npm test (tsx + node:test, tanpa dependensi baru).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { escHtml, langOf, highlightCode } from "../web/src/highlight.js";
+import { escHtml, langOf, highlightCode } from "../web/src/highlight.ts";
 
 describe("langOf", () => {
   it("memetakan ekstensi umum", () => {

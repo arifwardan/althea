@@ -1,7 +1,7 @@
 // Builder folder tree tab Files (murni, tanpa dependensi).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildFileTree, sortedNames } from "../web/src/tree.js";
+import { buildFileTree, sortedNames } from "../web/src/tree.ts";
 
 describe("buildFileTree", () => {
   it("file root tanpa folder", () => {

@@ -1,30 +1,62 @@
-<script>
-  import { highlightCode, langOf } from "./highlight.js";
-  import { summarizeToolCalls } from "./audit.js";
-  import { buildFileTree, sortedNames } from "./tree.js";
-  import Button from "./lib/components/ui/button.svelte";
-  import Badge from "./lib/components/ui/badge.svelte";
-  import Card from "./lib/components/ui/card.svelte";
-  import CardHeader from "./lib/components/ui/card-header.svelte";
-  import CardTitle from "./lib/components/ui/card-title.svelte";
-  import CardDescription from "./lib/components/ui/card-description.svelte";
-  import CardContent from "./lib/components/ui/card-content.svelte";
-  import CardFooter from "./lib/components/ui/card-footer.svelte";
-  import Input from "./lib/components/ui/input.svelte";
-  import Select from "./lib/components/ui/select.svelte";
-  import Progress from "./lib/components/ui/progress.svelte";
-  import * as Tabs from "./lib/components/ui/tabs/index.js";
-  let meta = $state(null);
-  let snap = $state(null);
+<script lang="ts">
+  import { highlightCode, langOf } from "./highlight.ts";
+  import { summarizeToolCalls } from "./audit.ts";
+  import { buildFileTree, sortedNames } from "./tree.ts";
+  import { Select, Progress } from "bits-ui";
+  import * as Tabs from "./lib/components/tabs/index.ts";
+  import Button from "./lib/components/button.svelte";
+  import type {
+    AltheaState,
+    Approval,
+    BrainInfo,
+    LimitsInfo,
+    McpInfo,
+    MetaInfo,
+    Metrics,
+    PreviewInfo,
+    Project,
+    ProjectDiff,
+    SelectOption,
+    StackTask,
+    TaskActivity,
+  } from "./lib/types";
+  import type { TreeFile, TreeNode } from "./tree.ts";
+
+  // Kelas bits-ui langsung — menggantikan lapisan wrapper shadcn-svelte.
+  // Untuk mengubah tampilan, edit konstanta di sini (atau token warna di tailwind.css).
+  // Tabs = component lokal (lib/components/tabs): susunan vertikal —
+  // tombol di atas, konten di bawah. Styling-nya ada di file component tersebut.
+  // Button = component lokal (lib/components/button.svelte) — pakai
+  // <Button variant="ghost|danger|cta|pick|…">.
+  const cCard = "rounded-lg border border-border bg-card text-card-foreground";
+  const cCardHeader = "flex flex-col gap-1 px-4 pt-3";
+  const cCardTitle = "text-sm leading-none font-semibold tracking-tight";
+  const cCardDesc = "text-xs text-muted-foreground";
+  const cCardContent = "px-4 py-3";
+  const cCardFooter = "flex items-center gap-2 border-t border-border px-4 py-2.5";
+  const cInput = "flex h-8 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50";
+  const cBadgeBase = "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium whitespace-nowrap transition-colors";
+  const cBadgeSuccess = `${cBadgeBase} border-success bg-success/25 text-success-foreground`;
+  const cBadgeDestructive = `${cBadgeBase} border-transparent bg-destructive text-destructive-foreground`;
+  const cBadgeWarning = `${cBadgeBase} border-warning bg-warning/25 text-warning-foreground`;
+  const cSelectTrigger = "flex h-8 w-full items-center justify-between rounded-md border border-input bg-transparent px-3 py-1 text-sm text-foreground focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50";
+  const cSelectContent = "z-50 flex max-h-72 min-w-36 flex-col overflow-hidden rounded-md border border-border bg-popover text-popover-foreground";
+  const cSelectItem = "relative flex cursor-pointer items-center rounded-sm px-2 py-1.5 text-sm outline-none select-none data-disabled:pointer-events-none data-disabled:opacity-50 data-highlighted:bg-accent data-highlighted:text-accent-foreground data-selected:font-medium";
+  const cSelectEmpty = "px-2 py-1.5 text-sm text-muted-foreground";
+  const cProgress = "relative h-1.5 w-full overflow-hidden rounded-full bg-secondary";
+  const cProgressFill = "h-full flex-1 rounded-full bg-primary transition-transform";
+
+  let meta = $state<MetaInfo | null>(null);
+  let snap = $state<AltheaState | null>(null);
   let report = $state("");
-  let metrics = $state(null);
-  let brain = $state(null);
+  let metrics = $state<Metrics | null>(null);
+  let brain = $state<BrainInfo | null>(null);
   let brainModel = $state("");
   let brainEffort = $state("");
   let brainProvider = $state("");
   let brainAgent = $state("");
   let brainBin = $state("");
-  const agentOptions = [
+  const agentOptions: SelectOption[] = [
     { value: "", label: "— env default —" },
     { value: "muse", label: "muse (Muse Code)" },
     { value: "opencode", label: "opencode" },
@@ -33,14 +65,14 @@
   // Opsi select model: dari katalog backend per agen (opencode = provider/model
   // terautentikasi, muse = daftar terkurasi). Nilai tersimpan yang tak ada di
   // katalog tetap dipertahankan sebagai opsi agar tak hilang.
-  let providerOptions = $derived([
+  let providerOptions = $derived<SelectOption[]>([
     { value: "", label: "all providers" },
     ...((brain?.catalog?.providers || []).map((p) => ({ value: p.id, label: p.name }))),
   ]);
   let filteredModels = $derived(
     (brain?.catalog?.models || []).filter((m) => !brainProvider || m.provider === brainProvider),
   );
-  let modelOptions = $derived([
+  let modelOptions = $derived<SelectOption[]>([
     { value: "", label: "— CLI default —" },
     ...filteredModels.map((m) => ({
       value: m.value,
@@ -50,6 +82,24 @@
       ? []
       : [{ value: brainModel, label: `${brainModel} (saved)` }]),
   ]);
+
+  // Select model (searchable): kotak pencarian + reset query tiap dibuka.
+  let modelSelOpen = $state(false);
+  let modelQuery = $state("");
+  let modelSearchEl = $state<HTMLInputElement | null>(null);
+  let modelSelItems = $derived(
+    !modelQuery.trim()
+      ? modelOptions
+      : modelOptions.filter((o) =>
+          `${o.label ?? ""} ${o.value ?? ""}`.toLowerCase().includes(modelQuery.trim().toLowerCase()),
+        ),
+  );
+  $effect(() => {
+    if (modelSelOpen) {
+      modelQuery = "";
+      requestAnimationFrame(() => modelSearchEl?.focus({ preventScroll: true }));
+    }
+  });
 
   // Ganti provider → model yang bukan miliknya ikut tereset.
   $effect(() => {
@@ -72,22 +122,22 @@
     }
   });
   let brainMsg = $state("");
-  let limits = $state(null);
+  let limits = $state<LimitsInfo | null>(null);
   let timeoutInput = $state("");
   let limitsMsg = $state("");
-  let cpuHist = $state([]);
-  let projects = $state([]);
+  let cpuHist = $state<number[]>([]);
+  let projects = $state<Project[]>([]);
   let projName = $state("");
   let projMode = $state("prompt"); // prompt|repo|zip|prd
   let projPrompt = $state("");
   let projRepo = $state("");
-  let projFile = $state(null);
-  let projStack = $state({ fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" });
-  let projCats = $state({ fungsi: [], bisnis: [], arsitektur: [], target: [], interaksi: [] });
+  let projFile = $state<File | null>(null);
+  let projStack = $state<Record<string, string>>({ fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" });
+  let projCats = $state<Record<string, string[]>>({ fungsi: [], bisnis: [], arsitektur: [], target: [], interaksi: [] });
   let projErr = $state("");
   let projMsg = $state("");
   let taskProject = $state("");
-  let authed = $state(null); // null=memuat, true, false
+  let authed = $state<boolean | null>(null); // null=memuat, true, false
   let pw = $state("");
   let loginErr = $state("");
   let title = $state("");
@@ -114,36 +164,37 @@
     { id: "css", label: "framework css" },
   ];
   const CAT_DIMS = ["fungsi", "bisnis", "arsitektur", "target", "interaksi"];
-  function toggleCat(dim, id) {
+  function toggleCat(dim: string, id: string) {
     const arr = projCats[dim] || [];
     projCats[dim] = arr.includes(id) ? arr.filter((x) => x !== id) : [...arr, id];
   }
-  function stackOptLabel(dim, id, fb) {
+  function stackOptLabel(dim: string, id: string, fb: string) {
     return meta?.stackOptions?.[dim]?.find((o) => o.id === id)?.label?.split(" (")[0] || fb;
   }
-  function stackText(p) {
-    const s = p.stackSpec || {};
+  function stackText(p: Project) {
+    const s = p.stackSpec || { fe: "", be: "", db: "", css: "" };
     return `${stackOptLabel("be", s.be, "Laravel")} + ${stackOptLabel("fe", s.fe, "Svelte")} + ${stackOptLabel("db", s.db, "PostgreSQL")} + ${stackOptLabel("css", s.css, "Tailwind")}`;
   }
-  function catLabel(dim, id) {
+  function catLabel(dim: string, id: string) {
     return meta?.categoryTaxonomy?.[dim]?.find((o) => o.id === id)?.label || id;
   }
-  function setStack(dim, id) {
+  function setStack(dim: string, id: string) {
     projStack[dim] = id;
   }
-  function shortOpt(o) {
+  function shortOpt(o: { label: string }) {
     return o.label.split(" (")[0];
   }
-  function pipeBadge(p) {
+  function pipeBadge(p: Project) {
     if (!p.pipeline) return { cls: "v-dim", text: "no pipeline", title: "no pipeline yet" };
     const done = p.pipeline.phases.filter((x) => x.done).length;
     const total = p.pipeline.phases.length || "…";
     return { cls: pipeCls(p.pipeline.status), text: `${p.pipeline.status} · ${done}/${total}`, title: (p.pipeline.note || p.pipeline.goal || "") + ` (${p.pipeline.status})` };
   }
-  function catBadges(p) {
-    const all = [];
+  function catBadges(p: Project) {
+    const all: string[] = [];
+    const cats = p.categories as Record<string, string[]> | undefined;
     for (const d of CAT_DIMS) {
-      for (const id of (p.categories?.[d] || [])) all.push(catLabel(d, id));
+      for (const id of (cats?.[d] || [])) all.push(catLabel(d, id));
     }
     return { shown: all.slice(0, 4), extra: Math.max(0, all.length - 4) };
   }
@@ -164,47 +215,47 @@
   let palOpen = $state(false);
   let palQ = $state("");
   let palIdx = $state(0);
-  let logId = $state(null);
-  let logLines = $state([]);
+  let logId = $state<string | null>(null);
+  let logLines = $state<string[]>([]);
   let logDone = $state(false);
-  let detailId = $state(null);
-  let revProj = $state(null);
-  let revActId = $state(null); // tugas yang feed tool-nya dibuka di panel review
-  let revDiff = $state(null);
-  let revFiles = $state([]);
+  let detailId = $state<string | null>(null);
+  let revProj = $state<string | null>(null);
+  let revActId = $state<string | null>(null); // tugas yang feed tool-nya dibuka di panel review
+  let revDiff = $state<ProjectDiff | null>(null);
+  let revFiles = $state<TreeFile[]>([]);
   let revFilePath = $state("");
   let revContent = $state("");
   let revErr = $state("");
-  let mcpInfo = $state(null);
+  let mcpInfo = $state<McpInfo | null>(null);
   let mcpBusy = $state(false);
-  let pvInfo = $state(null);
+  let pvInfo = $state<PreviewInfo | null>(null);
   let pvCmd = $state("");
   let pvBusy = $state(false);
   let pvFrameKey = $state(0);
   let showPvLog = $state(false);
-  let fTarget = $state(null); // id tugas untuk tindak lanjut
-  let cTarget = $state(null); // id tugas yang dikoreksi mid-run
+  let fTarget = $state<string | null>(null); // id tugas untuk tindak lanjut
+  let cTarget = $state<string | null>(null); // id tugas yang dikoreksi mid-run
   let cText = $state("");
   let cErr = $state("");
   let fText = $state("");
   let instructText = $state("");
-  let showNote = $state(null); // id tugas yang hasilnya dibuka
+  let showNote = $state<string | null>(null); // id tugas yang hasilnya dibuka
   let revTab = $state("tugas"); // tab aktif panel review
-  let expandedDirs = $state({}); // path folder → true/false (tab Files)
+  let expandedDirs = $state<Record<string, boolean>>({}); // path folder → true/false (tab Files)
   let fileTree = $derived(buildFileTree(revFiles));
-  function dirOpen(path, depth) {
+  function dirOpen(path: string, depth: number) {
     if (path in expandedDirs) return expandedDirs[path];
     return depth <= 1; // level atas terbuka default, dalam tertutup
   }
-  function toggleDir(path, depth) {
+  function toggleDir(path: string, depth: number) {
     expandedDirs[path] = !dirOpen(path, depth);
   }
   let projTab = $state("list"); // tab halaman projects: list | baru
   let termTab = $state("term");
-  let homeDiff = $state(null);
-  let es = null;
+  let homeDiff = $state<ProjectDiff | null>(null);
+  let es: EventSource | null = null;
 
-  async function api(path, opts = {}) {
+  async function api(path: string, opts: RequestInit = {}) {
     const r = await fetch(path, {
       credentials: "include",
       headers: { "content-type": "application/json" },
@@ -239,6 +290,7 @@
   }
 
   function syncBrainFields() {
+    if (!brain) return;
     brainModel = brain.model || "";
     brainEffort = brain.effort || "";
     brainAgent = brain.agentSource === "dashboard" ? brain.agent : "";
@@ -257,8 +309,9 @@
 
   async function loadLimits() {
     try {
-      limits = await (await api("/api/limits")).json();
-      timeoutInput = limits.timeoutOverride ? String(limits.timeoutOverride) : "";
+      const j = await (await api("/api/limits")).json();
+      limits = j;
+      timeoutInput = j.timeoutOverride ? String(j.timeoutOverride) : "";
     } catch {
       /* authed=false ditangani api() */
     }
@@ -343,7 +396,7 @@
     snap = null;
   }
 
-  async function act(path, body) {
+  async function act(path: string, body?: unknown) {
     busy = path;
     try {
       await api(path, { method: "POST", body: JSON.stringify(body) });
@@ -353,7 +406,7 @@
     }
   }
 
-  const approve = (id, ok) => act("/api/approve", { id, ok });
+  const approve = (id: string, ok: boolean) => act("/api/approve", { id, ok });
   const addTask = async () => {
     if (!prompt.trim()) return;
     await act("/api/tasks", {
@@ -416,7 +469,7 @@
       projFile = null;
       projStack = { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" };
       projCats = { fungsi: [], bisnis: [], arsitektur: [], target: [], interaksi: [] };
-      const fi = document.getElementById("pfile");
+      const fi = document.getElementById("pfile") as HTMLInputElement | null;
       if (fi) fi.value = "";
       await load();
       projTab = "list";
@@ -426,7 +479,7 @@
     }
   }
 
-  async function pipeAct(name, action) {
+  async function pipeAct(name: string, action: string) {
     projErr = "";
     revErr = "";
     busy = "pipe";
@@ -462,7 +515,7 @@
       fText = "";
       await load();
     } catch (e) {
-      revErr = "✕ " + (e?.message || "send failed");
+      revErr = "✕ " + (e instanceof Error ? e.message : "send failed");
     } finally {
       busy = "";
     }
@@ -490,12 +543,12 @@
     }
   }
 
-  async function cancel(id) {
+  async function cancel(id: string) {
     if (!confirm(`Stop task ${id}? The muse process will be killed.`)) return;
     await act(`/api/tasks/${encodeURIComponent(id)}/cancel`, {});
   }
 
-  async function reviewTask(id) {
+  async function reviewTask(id: string) {
     busy = "rev";
     try {
       const r = await api(`/api/tasks/${encodeURIComponent(id)}/reviewed`, { method: "POST" });
@@ -510,7 +563,7 @@
     }
   }
 
-  async function runTask(id) {
+  async function runTask(id: string) {
     busy = "run";
     try {
       const r = await api(`/api/tasks/${encodeURIComponent(id)}/rerun`, { method: "POST" });
@@ -525,7 +578,7 @@
     }
   }
 
-  async function delTask(id, title) {
+  async function delTask(id: string, title: string) {
     if (!confirm(`Delete task ${id} (${title})? It will be removed from the stack entirely (no history).`)) return;
     busy = "del";
     try {
@@ -565,7 +618,7 @@
     }
   }
 
-  function openLog(id) {
+  function openLog(id: string) {
     closeLog();
     logId = id;
     logLines = [];
@@ -575,7 +628,7 @@
       try {
         const d = JSON.parse(e.data);
         if (d.lines?.length) logLines = [...logLines, ...d.lines].slice(-300);
-        if (d.done) { logDone = true; es.close(); }
+        if (d.done) { logDone = true; es?.close(); }
       } catch { /* abaikan frame rusak */ }
     };
   }
@@ -584,7 +637,7 @@
     logId = null;
   }
 
-  async function openReview(name) {
+  async function openReview(name: string) {
     revProj = name;
     revTab = "tugas";
     expandedDirs = {};
@@ -697,7 +750,7 @@
     }
   }
 
-  async function toggleMcp(id) {
+  async function toggleMcp(id: string) {
     if (!revProj || !mcpInfo?.servers || mcpBusy) return;
     mcpBusy = true;
     try {
@@ -723,18 +776,19 @@
   function closeReview() {
     revProj = null;
   }
-  function goReview(name) {
+  function goReview(name: string) {
     view = "projects";
     openReview(name);
   }
-  function goLog(id) {
+  function goLog(id: string) {
     view = "tasks";
     openLog(id);
   }
-  function pipeCls(st) {
+  function pipeCls(st: string) {
     return st === "running" ? "v-ok" : st === "paused" ? "v-warn" : st === "done" ? "v-ok" : "v-err";
   }
-  async function openFile(path) {
+  async function openFile(path: string) {
+    if (!revProj) return;
     revFilePath = path;
     revContent = "loading…";
     try {
@@ -746,7 +800,7 @@
     }
   }
 
-  async function delProject(name) {
+  async function delProject(name: string) {
     if (!confirm(`Delete project "${name}" from the workspace?`)) return;
     busy = "del:" + name;
     try {
@@ -758,45 +812,45 @@
     }
   }
 
-  function deadline(a) {
+  function deadline(a: Approval) {
     if (!meta) return 0;
     if (a.stage === "web") return Date.parse(a.createdAt) + meta.approvalWebMinutes * 60000;
     return Date.parse(a.escalatedAt || a.createdAt) + meta.approvalTelegramMinutes * 60000;
   }
-  function fmt(ms) {
+  function fmt(ms: number) {
     if (ms <= 0) return "0:00";
     const s = Math.floor(ms / 1000);
     return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
   }
-  function dur(sec) {
+  function dur(sec: number) {
     sec = Math.max(0, Math.floor(sec));
     const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
     return (h ? h + "h " : "") + (m ? m + "m " : "") + s + "s";
   }
-  function gb(b) {
+  function gb(b: number) {
     return (b / 1073741824).toFixed(1) + " GB";
   }
-  function fmtTok(n) {
+  function fmtTok(n: number) {
     n = Math.round(n || 0);
     return n >= 1000 ? (n / 1000).toFixed(1) + "k" : "" + n;
   }
-  function tokOf(t) {
+  function tokOf(t: StackTask) {
     return (t.usage?.tokIn || 0) + (t.usage?.tokOut || 0);
   }
-  function actsOf(id) {
+  function actsOf(id: string) {
     return (snap?.activity?.[id] || []).slice(-40);
   }
-  function lastAct(id) {
+  function lastAct(id: string) {
     const arr = snap?.activity?.[id] || [];
     return arr.length ? arr[arr.length - 1].text : "";
   }
-  function actCls(a) {
+  function actCls(a: TaskActivity) {
     if (a.kind === "file") return "v-ok";
     if (a.kind === "note" || a.text.includes("✕")) return "v-err";
     return "v-dim";
   }
-  function filesTouched(id) {
-    const out = [];
+  function filesTouched(id: string) {
+    const out: string[] = [];
     for (const a of snap?.activity?.[id] || []) {
       if (a.kind !== "file") continue;
       const p = a.text.replace(/^(new|modified): /, "");
@@ -804,13 +858,13 @@
     }
     return out;
   }
-  function evCls(e) {
+  function evCls(e: string) {
     if (/done|\bOK\b|resum|wake/i.test(e)) return "v-ok";
     if (/fail|reject|error|cancel/i.test(e)) return "v-err";
     if (/limit|escalat|auto|approval|sleep/i.test(e)) return "v-warn";
     return "v-dim";
   }
-  function ago(iso) {
+  function ago(iso: string) {
     if (!iso) return "—";
     const s = Math.max(0, Math.floor((now - Date.parse(iso)) / 1000));
     if (s < 60) return `${s}s ago`;
@@ -818,7 +872,7 @@
     if (m < 60) return `${m} min ago`;
     return `${Math.floor(m / 60)}h ago`;
   }
-  function tlKind(msg) {
+  function tlKind(msg: string) {
     if (/attempt/.test(msg)) return { label: "Coding", cls: "v-ok" };
     if (/^done /.test(msg)) return { label: "Completed", cls: "v-ok" };
     if (/failed|REJECT|cancel/.test(msg)) return { label: "Failed", cls: "v-err" };
@@ -847,7 +901,7 @@
   function closePal() {
     palOpen = false;
   }
-  function palKey(e) {
+  function palKey(e: KeyboardEvent) {
     if (e.key === "ArrowDown") { palIdx = Math.min(palItems.length - 1, palIdx + 1); e.preventDefault(); }
     else if (e.key === "ArrowUp") { palIdx = Math.max(0, palIdx - 1); e.preventDefault(); }
     else if (e.key === "Enter") {
@@ -892,7 +946,7 @@
   });
 
   $effect(() => {
-    const keys = (e) => {
+    const keys = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         if (authed) { palOpen ? closePal() : openPal(); e.preventDefault(); }
         return;
@@ -937,7 +991,7 @@
     : current ? { label: "READY", cls: "v-ok" }
     : { label: "IDLE", cls: "v-dim" }
   );
-  let agentLabel = $derived((brain || meta?.brain)?.agent === "opencode" ? "OpenCode" : "Muse Code");
+  let agentLabel = $derived(brain?.agent === "opencode" ? "OpenCode" : "Muse Code");
   let history = $derived((snap?.stack || []).filter((t) => t.status === "done" || t.status === "failed").slice(-5).reverse());
   let nextQueued = $derived([...(snap?.stack || [])].reverse().filter((t) => t.status === "queued").slice(0, 3));
   let recentEvents = $derived((snap?.events || []).slice(-4).reverse());
@@ -945,7 +999,10 @@
     const h = cpuHist.length ? cpuHist : [0];
     return h.map((v, i) => `${(i * 260) / Math.max(1, h.length - 1)},${36 - (v / 100) * 32}`).join(" ");
   });
-  let lastEventIso = $derived((snap?.events || []).length ? snap.events[snap.events.length - 1].slice(0, 24) : null);
+  let lastEventIso = $derived.by(() => {
+    const evs = snap?.events || [];
+    return evs.length ? evs[evs.length - 1].slice(0, 24) : "";
+  });
   let projTok = $derived.by(() => {
     const p = current?.project;
     let ti = 0, to = 0;
@@ -1006,8 +1063,8 @@
       </button>
     {/if}
     <span class="clock">{new Date(now).toLocaleString("en-US")}</span>
-    <button class="ghost" onclick={openPal} title="command palette (Ctrl+K)">⌘K</button>
-    <button class="ghost" onclick={logout}>log out</button>
+    <Button variant="ghost" onclick={openPal} title="command palette (Ctrl+K)">⌘K</Button>
+    <Button variant="ghost" onclick={logout}>log out</Button>
   </span>
 </header>
 <div class="app">
@@ -1065,7 +1122,7 @@
           <span class="countdown">{fmt(deadline(a) - now)}</span>
           <span class="hero-alert-btns">
             <button onclick={() => approve(a.id, true)} disabled={!!busy}>[approve]</button>
-            <button class="danger" onclick={() => approve(a.id, false)} disabled={!!busy}>[reject]</button>
+            <Button variant="danger" onclick={() => approve(a.id, false)} disabled={!!busy}>[reject]</Button>
           </span>
         </div>
       {/each}
@@ -1083,7 +1140,7 @@
         <div class="ministats">
           <div><span class="v-dim">runtime</span><b>{metrics ? dur(metrics.procUptimeSec) : "…"}</b></div>
           <div><span class="v-dim">activity</span><b>{ago(lastEventIso)}</b></div>
-          <div><span class="v-dim">token ±</span><b>~{fmtTok((snap.usage?.tokIn || 0) + (snap.usage?.tokOut || 0))}</b></div>
+          <div><span class="v-dim">token ±</span><b>~{fmtTok((snap?.usage?.tokIn || 0) + (snap?.usage?.tokOut || 0))}</b></div>
         </div>
       </div>
       <div class="panel">
@@ -1096,10 +1153,10 @@
         </div>
         <div class="hint">{fmtTok(projTok.in)} in · {fmtTok(projTok.out)} out</div>
         <div class="toklabel" style="margin-top:12px">Total</div>
-        <div class="toknum">~{fmtTok((snap.usage?.tokIn || 0) + (snap.usage?.tokOut || 0))}</div>
+        <div class="toknum">~{fmtTok((snap?.usage?.tokIn || 0) + (snap?.usage?.tokOut || 0))}</div>
         <div class="splitbar">
-          <div class="spin" style="width:{(((snap.usage?.tokIn || 0) / (((snap.usage?.tokIn || 0) + (snap.usage?.tokOut || 0)) || 1)) * 100).toFixed(1)}%"></div>
-          <div class="spout" style="width:{(((snap.usage?.tokOut || 0) / (((snap.usage?.tokIn || 0) + (snap.usage?.tokOut || 0)) || 1)) * 100).toFixed(1)}%"></div>
+          <div class="spin" style="width:{(((snap.usage?.tokIn || 0) / (((snap?.usage?.tokIn || 0) + (snap?.usage?.tokOut || 0)) || 1)) * 100).toFixed(1)}%"></div>
+          <div class="spout" style="width:{(((snap.usage?.tokOut || 0) / (((snap?.usage?.tokIn || 0) + (snap?.usage?.tokOut || 0)) || 1)) * 100).toFixed(1)}%"></div>
         </div>
         <div class="hint">{snap.usage?.runs || 0} runs · estimated ±3.5 chars/token</div>
       </div>
@@ -1111,10 +1168,10 @@
         <div class="row"><span class="k">pending approvals</span><span class={snap.approvals.length ? "v-warn" : "v-ok"}>{snap.approvals.length}</span></div>
         <div class="btnrow">
           {#if current?.status === "running"}
-            <button class="danger" onclick={() => cancel(current.id)} disabled={!!busy}>[stop]</button>
+            <Button variant="danger" onclick={() => cancel(current.id)} disabled={!!busy}>[stop]</Button>
           {/if}
-          <button class="ghost" onclick={() => act("/api/wake", {})} disabled={!!busy}>wake</button>
-          <button class="ghost" onclick={() => act("/api/sleep", { minutes: Number(sleepMin) || 60 })} disabled={!!busy}>sleep</button>
+          <Button variant="ghost" onclick={() => act("/api/wake", {})} disabled={!!busy}>wake</Button>
+          <Button variant="ghost" onclick={() => act("/api/sleep", { minutes: Number(sleepMin) || 60 })} disabled={!!busy}>sleep</Button>
           <input type="number" bind:value={sleepMin} min="1" max="1440" style="width:64px" aria-label="sleep minutes" />
         </div>
       </div>
@@ -1126,7 +1183,7 @@
         <div class="ic-title">{current?.title || "—"}{current?.project ? ` @${current.project}` : ""}</div>
         {#if roundPct != null}
           <div class="prog"><div class="progfill" style="width:{roundPct}%"></div></div>
-          <div class="hint">round {(current.graph.iteration ?? 0) + 1}/{meta.graphMaxRounds}</div>
+          <div class="hint">round {(current?.graph?.iteration ?? 0) + 1}/{meta?.graphMaxRounds}</div>
         {:else}
           <div class="hint">{current ? current.status : "no tasks"}</div>
         {/if}
@@ -1152,11 +1209,11 @@
             <div style="display:flex; gap:8px">
               <input id="cor" type="text" bind:value={cText} placeholder="e.g. pakai Elysia, bukan Express" />
               <button onclick={sendCorrect} disabled={busy === "correct" || !cText.trim()} style="white-space:nowrap">[send]</button>
-              <button class="ghost" onclick={() => { cTarget = null; cText = ""; cErr = ""; }}>[cancel]</button>
+              <Button variant="ghost" onclick={() => { cTarget = null; cText = ""; cErr = ""; }}>[cancel]</Button>
             </div>
             {#if cErr}<div class="hint" style="color:var(--err, #f66)">{cErr}</div>{/if}
           {:else}
-            <div class="btnrow"><button class="ghost" onclick={() => { cTarget = current.id; cText = ""; cErr = ""; }} disabled={!!busy}>[correct]</button></div>
+            <div class="btnrow"><Button variant="ghost" onclick={() => { cTarget = current.id; cText = ""; cErr = ""; }} disabled={!!busy}>[correct]</Button></div>
           {/if}
         {/if}
       </div>
@@ -1167,7 +1224,7 @@
             <div><span class="tdot {evCls(e)}"></span><span class="ttime">{e.slice(11, 19)}</span><span>{e.slice(20, 90)}</span></div>
           {/each}
         </div>
-        <div class="btnrow"><button class="ghost" onclick={() => { view = "tasks"; }}>open tasks →</button></div>
+        <div class="btnrow"><Button variant="ghost" onclick={() => { view = "tasks"; }}>open tasks →</Button></div>
       </div>
       <div class="panel">
         <h2>runtime_timeline</h2>
@@ -1184,18 +1241,18 @@
       <div class="panel">
         <h2>terminal</h2>
         <Tabs.Root bind:value={termTab} aria-label="terminal views">
-          <Tabs.List variant="line">
+          <Tabs.List>
             <Tabs.Trigger value="term">terminal</Tabs.Trigger>
             <Tabs.Trigger value="logs">logs</Tabs.Trigger>
             <Tabs.Trigger value="out">output</Tabs.Trigger>
           </Tabs.List>
-          <Tabs.Content value="term">
+          <Tabs.Content value="term" tabindex={0}>
             <pre class="dump termview">{current && (snap.logs[current.id] || []).length ? (snap.logs[current.id] || []).slice(-30).join("\n") : "waiting for output…"}</pre>
           </Tabs.Content>
-          <Tabs.Content value="logs">
+          <Tabs.Content value="logs" tabindex={0}>
             <pre class="dump termview">{report}</pre>
           </Tabs.Content>
-          <Tabs.Content value="out">
+          <Tabs.Content value="out" tabindex={0}>
             <pre class="dump termview">{history[0]?.note || "—"}</pre>
           </Tabs.Content>
         </Tabs.Root>
@@ -1238,7 +1295,7 @@
               </div>
               <div class="btnrow">
                 <button onclick={() => approve(a.id, true)} disabled={!!busy}>[approve]</button>
-                <button class="danger" onclick={() => approve(a.id, false)} disabled={!!busy}>[reject]</button>
+                <Button variant="danger" onclick={() => approve(a.id, false)} disabled={!!busy}>[reject]</Button>
               </div>
             </div>
           {/each}
@@ -1264,7 +1321,7 @@
     </div>
     <div class="grid" style="margin-top:12px">
       <div class="panel">
-        {#snippet taskDetail(t)}
+        {#snippet taskDetail(t: StackTask)}
           <div style="margin:2px 0 12px">
             <div class="hint">prompt</div>
             <pre class="dump" style="max-height:120px; margin:4px 0 10px">{t.prompt}</pre>
@@ -1275,7 +1332,7 @@
                 {#if filesTouched(t.id).length > 12}<span class="v-dim">+{filesTouched(t.id).length - 12} more</span>{/if}
               </div>
             {/if}
-            <div class="hint">activity ({(snap.activity?.[t.id] || []).length})</div>
+            <div class="hint">activity ({(snap?.activity?.[t.id] || []).length})</div>
             {#if !actsOf(t.id).length}
               <div class="hint" style="margin:4px 0">nothing yet — appears when althea calls tools/touches files.</div>
             {:else}
@@ -1304,10 +1361,10 @@
             </span>
             <span class="v-dim" style="font-size:12px">~{fmtTok(tokOf(t))}</span>
             <span style="margin-left:auto; display:flex; gap:6px">
-              <button class="ghost" onclick={() => { detailId = detailId === t.id ? null : t.id; }}>[detail]</button>
-              <button class="ghost" onclick={() => openLog(t.id)}>[log]</button>
-              <button class="ghost danger" onclick={() => cancel(t.id)} disabled={!!busy}>[stop]</button>
-              <button class="ghost danger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</button>
+              <Button variant="ghost" onclick={() => { detailId = detailId === t.id ? null : t.id; }}>[detail]</Button>
+              <Button variant="ghost" onclick={() => openLog(t.id)}>[log]</Button>
+              <Button variant="ghostDanger" onclick={() => cancel(t.id)} disabled={!!busy}>[stop]</Button>
+              <Button variant="ghostDanger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</Button>
             </span>
           </div>
           {#if detailId === t.id}{@render taskDetail(t)}{/if}
@@ -1320,15 +1377,15 @@
             <span>{t.title}{t.project ? ` @${t.project}` : ""}</span>
             <span class="v-dim" style="font-size:12px">~{fmtTok(tokOf(t))}</span>
             <span style="margin-left:auto; display:flex; gap:6px">
-              <button class="ghost" onclick={() => { detailId = detailId === t.id ? null : t.id; }}>[detail]</button>
-              <button class="ghost" onclick={() => openLog(t.id)}>[log]</button>
-              <button class="ghost" onclick={() => runTask(t.id)} disabled={!!busy} title="requeue without changing the prompt">[run]</button>
+              <Button variant="ghost" onclick={() => { detailId = detailId === t.id ? null : t.id; }}>[detail]</Button>
+              <Button variant="ghost" onclick={() => openLog(t.id)}>[log]</Button>
+              <Button variant="ghost" onclick={() => runTask(t.id)} disabled={!!busy} title="requeue without changing the prompt">[run]</Button>
               {#if !t.reviewedAt}
-                <button class="ghost" onclick={() => reviewTask(t.id)} disabled={!!busy} title="mark this finished task as reviewed">[review]</button>
+                <Button variant="ghost" onclick={() => reviewTask(t.id)} disabled={!!busy} title="mark this finished task as reviewed">[review]</Button>
               {:else}
                 <span class="v-dim" title="reviewed">✓</span>
               {/if}
-              <button class="ghost danger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</button>
+              <Button variant="ghostDanger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</Button>
             </span>
           </div>
           {#if detailId === t.id}{@render taskDetail(t)}{/if}
@@ -1339,7 +1396,7 @@
         {#if logId}
           <div class="hint" style="margin-bottom:8px">{logId} {logDone ? "[done]" : "[streaming…]"}</div>
           <pre class="dump logview" id="logpre">{logLines.length ? logLines.join("\n") : "waiting for output…"}</pre>
-          <div class="btnrow"><button class="ghost" onclick={closeLog}>[close]</button></div>
+          <div class="btnrow"><Button variant="ghost" onclick={closeLog}>[close]</Button></div>
         {:else}
           <span class="v-dim">Pick [log] on a task to stream muse output here.</span>
         {/if}
@@ -1352,13 +1409,13 @@
         <h2 style="margin:0">workspace_projects · {projects.length}</h2>
       </div>
       <Tabs.Root bind:value={projTab} aria-label="project pages">
-        <Tabs.List variant="line">
+        <Tabs.List>
           <Tabs.Trigger value="list">project list</Tabs.Trigger>
           <Tabs.Trigger value="baru" onclick={() => { projErr = ""; }}>+ new project</Tabs.Trigger>
         </Tabs.List>
         <Tabs.Content value="list">
         {#if !projects.length}
-          <div class="pempty">no projects yet — switch to the <button class="ghost" onclick={() => { projTab = "baru"; }}>+ new project</button> tab to create one from prompt, repo, zip, or PRD.</div>
+          <div class="pempty">no projects yet — switch to the <Button variant="ghost" onclick={() => { projTab = "baru"; }}>+ new project</Button> tab to create one from prompt, repo, zip, or PRD.</div>
         {:else}
           <div class="projgrid">
           {#each projects as p (p.name)}
@@ -1379,7 +1436,7 @@
               <div class="psource">{p.source}</div>
               <div class="pcard-foot">
                 <button onclick={() => openReview(p.name)}>[review]</button>
-                <button class="danger" onclick={() => delProject(p.name)} disabled={!!busy}>[delete]</button>
+                <Button variant="danger" onclick={() => delProject(p.name)} disabled={!!busy}>[delete]</Button>
               </div>
             </div>
           {/each}
@@ -1396,7 +1453,7 @@
       <div class="fcard">
         <div class="fsect">2 · source</div>
         <Tabs.Root bind:value={projMode} aria-label="project source">
-          <Tabs.List variant="line">
+          <Tabs.List>
             {#each MODES as m}
               <Tabs.Trigger value={m.id} onclick={() => { projErr = ""; }}>{m.label}</Tabs.Trigger>
             {/each}
@@ -1438,7 +1495,7 @@
                 <div class="stackdim">{d.label}</div>
                 <div class="optbadges">
                   {#each meta.stackOptions[d.id] as o}
-                    <button class={"pick" + (projStack[d.id] === o.id ? " on" : "")} title={o.label} aria-pressed={projStack[d.id] === o.id} onclick={() => setStack(d.id, o.id)}>{shortOpt(o)}</button>
+                    <Button variant="pick" active={projStack[d.id] === o.id} title={o.label} aria-pressed={projStack[d.id] === o.id} onclick={() => setStack(d.id, o.id)}>{shortOpt(o)}</Button>
                   {/each}
                 </div>
               </div>
@@ -1463,7 +1520,7 @@
               <div class="pickrow">
                 {#each meta.categoryTaxonomy[dim] as o}
                   {@const sel = (projCats[dim] || []).includes(o.id)}
-                  <button class={"pick" + (sel ? " on" : "")} aria-pressed={sel} onclick={() => toggleCat(dim, o.id)}>{o.label}</button>
+                  <Button variant="pick" active={sel} aria-pressed={sel} onclick={() => toggleCat(dim, o.id)}>{o.label}</Button>
                 {/each}
               </div>
             </details>
@@ -1476,14 +1533,13 @@
       </div>
       {/if}
       <div class="btnrow">
-        <button
-          class="cta"
+        <Button variant="cta"
           onclick={addProject}
           disabled={busy === "proj" || !projName.trim() ||
             (projMode === "prompt" && !projPrompt.trim()) ||
             (projMode === "repo" && !projRepo.trim()) ||
             ((projMode === "zip" || projMode === "prd") && !projFile)}
-        >[create project]</button>
+        >[create project]</Button>
       </div>
       {#if projErr}<div class="err">✕ {projErr}</div>{/if}
       {#if projMsg}<div class="hint v-ok" style="margin-top:8px">{projMsg}</div>{/if}
@@ -1495,11 +1551,11 @@
       <div class="panel" style="margin-top:12px">
         <div class="revhead">
           <h2 style="margin:0">review {revProj}</h2>
-          <span style="margin-left:auto"><button class="ghost" onclick={closeReview}>[close]</button></span>
+          <span style="margin-left:auto"><Button variant="ghost" onclick={closeReview}>[close]</Button></span>
         </div>
         {#if revErr}<div class="err">✕ {revErr}</div>{/if}
         <Tabs.Root bind:value={revTab} aria-label="review sections">
-          <Tabs.List variant="line">
+          <Tabs.List>
             {#each REVTABS as t}
               <Tabs.Trigger value={t.id}>{t.label}{t.id === "tugas" && revTasks.length ? ` (${revTasks.length})` : ""}{t.id === "files" && revFiles.length ? ` (${revFiles.length})` : ""}</Tabs.Trigger>
             {/each}
@@ -1512,13 +1568,13 @@
             <span class="v-dim">{revPipe.note || revPipe.goal}</span>
             <span style="margin-left:auto; display:flex; gap:6px">
               {#if revPipe.status === "running"}
-                <button class="ghost warn" onclick={() => pipeAct(revProj, "pause")} disabled={!!busy}>[pause]</button>
-                <button class="ghost danger" onclick={() => pipeAct(revProj, "cancel")} disabled={!!busy}>[stop]</button>
+                <button class="ghost warn" onclick={() => pipeAct(revProj!, "pause")} disabled={!!busy}>[pause]</button>
+                <Button variant="ghostDanger" onclick={() => pipeAct(revProj!, "cancel")} disabled={!!busy}>[stop]</Button>
               {:else if revPipe.status === "paused"}
-                <button class="ghost" onclick={() => pipeAct(revProj, "resume")} disabled={!!busy}>[resume]</button>
-                <button class="ghost danger" onclick={() => pipeAct(revProj, "cancel")} disabled={!!busy}>[stop]</button>
+                <Button variant="ghost" onclick={() => pipeAct(revProj!, "resume")} disabled={!!busy}>[resume]</Button>
+                <Button variant="ghostDanger" onclick={() => pipeAct(revProj!, "cancel")} disabled={!!busy}>[stop]</Button>
               {:else if revPipe.status === "failed"}
-                <button class="ghost" onclick={() => pipeAct(revProj, "resume")} disabled={!!busy}>[retry phase]</button>
+                <Button variant="ghost" onclick={() => pipeAct(revProj!, "resume")} disabled={!!busy}>[retry phase]</Button>
               {/if}
             </span>
           </div>
@@ -1543,19 +1599,19 @@
               <span>{t.title}</span>
               {#if t.phase}<span class="v-dim">[{t.phase}]</span>{/if}
               <span style="margin-left:auto; display:flex; gap:6px">
-                {#if t.note}<button class="ghost" onclick={() => { showNote = showNote === t.id ? null : t.id; }}>[result]</button>{/if}
-                <button class="ghost" onclick={() => goLog(t.id)}>[log]</button>
-                <button class="ghost" onclick={() => { revActId = revActId === t.id ? null : t.id; }}>[tools]</button>
-                <button class="ghost" onclick={() => { fTarget = t.id; }}>[follow up]</button>
+                {#if t.note}<Button variant="ghost" onclick={() => { showNote = showNote === t.id ? null : t.id; }}>[result]</Button>{/if}
+                <Button variant="ghost" onclick={() => goLog(t.id)}>[log]</Button>
+                <Button variant="ghost" onclick={() => { revActId = revActId === t.id ? null : t.id; }}>[tools]</Button>
+                <Button variant="ghost" onclick={() => { fTarget = t.id; }}>[follow up]</Button>
                 {#if t.status === "done" || t.status === "failed"}
-                  <button class="ghost" onclick={() => runTask(t.id)} disabled={!!busy} title="requeue without changing the prompt">[run]</button>
+                  <Button variant="ghost" onclick={() => runTask(t.id)} disabled={!!busy} title="requeue without changing the prompt">[run]</Button>
                 {/if}
                 {#if t.status === "done" && !t.reviewedAt}
-                  <button class="ghost" onclick={() => reviewTask(t.id)} disabled={!!busy} title="mark this finished task as reviewed">[review]</button>
+                  <Button variant="ghost" onclick={() => reviewTask(t.id)} disabled={!!busy} title="mark this finished task as reviewed">[review]</Button>
                 {:else if t.status === "done"}
                   <span class="v-dim" title="reviewed">✓</span>
                 {/if}
-                <button class="ghost danger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</button>
+                <Button variant="ghostDanger" onclick={() => delTask(t.id, t.title)} disabled={!!busy}>[delete]</Button>
               </span>
             </div>
             {#if showNote === t.id}
@@ -1594,7 +1650,7 @@
           <div style="display:flex; gap:8px">
             <input id="fup" type="text" bind:value={fText} placeholder="e.g. tidy the cashier view, add a print button" />
             <button onclick={sendFollowup} disabled={busy === "fup" || !fText.trim()} style="white-space:nowrap">[send]</button>
-            <button class="ghost" onclick={() => { fTarget = null; fText = ""; }}>[cancel]</button>
+            <Button variant="ghost" onclick={() => { fTarget = null; fText = ""; }}>[cancel]</Button>
           </div>
         {/if}
         <label for="ins">ask althea — free-form instructions for this project</label>
@@ -1622,7 +1678,7 @@
                 <span class="v-warn">not runnable</span>
               {/if}
               <span style="margin-left:auto">
-                <button class="ghost" onclick={() => toggleMcp(m.id)} disabled={mcpBusy}>[{m.enabled ? "disable" : "enable"}]</button>
+                <Button variant="ghost" onclick={() => toggleMcp(m.id)} disabled={mcpBusy}>[{m.enabled ? "disable" : "enable"}]</Button>
               </span>
             </div>
             {#if m.enabled && m.runnable === false}
@@ -1646,7 +1702,7 @@
               <a class="ghostlink" href={pvInfo.tabUrl || pvInfo.url || ""} target="_blank" rel="noreferrer">[open tab]</a>
             {/if}
             <span style="margin-left:auto; display:flex; gap:6px">
-              <button class="ghost" onclick={pvLink} disabled={pvBusy}>[link to lerd]</button>
+              <Button variant="ghost" onclick={pvLink} disabled={pvBusy}>[link to lerd]</Button>
             </span>
           </div>
           {#if pvInfo.lerdOk === false}
@@ -1671,12 +1727,12 @@
               <a class="ghostlink" href={pvInfo.tabUrl || pvInfo.url || ""} target="_blank" rel="noreferrer">[open tab]</a>
             {/if}
             <span style="margin-left:auto; display:flex; gap:6px">
-              <button class="ghost" onclick={pvRefresh} disabled={pvBusy}>[refresh]</button>
+              <Button variant="ghost" onclick={pvRefresh} disabled={pvBusy}>[refresh]</Button>
               {#if pvInfo.state === "running" && pvInfo.mode === "server"}
-                <button class="ghost" onclick={() => { pvFrameKey++; }}>[reload]</button>
+                <Button variant="ghost" onclick={() => { pvFrameKey++; }}>[reload]</Button>
               {/if}
               {#if (pvInfo.state === "running" || pvInfo.state === "starting") && pvInfo.mode !== "static"}
-                <button class="ghost danger" onclick={pvStop} disabled={pvBusy}>[stop]</button>
+                <Button variant="ghostDanger" onclick={pvStop} disabled={pvBusy}>[stop]</Button>
               {/if}
             </span>
           </div>
@@ -1707,7 +1763,7 @@
           {/if}
           {#if pvInfo.logs?.length}
             <div class="btnrow" style="margin-top:8px">
-              <button class="ghost" onclick={() => { showPvLog = !showPvLog; }}>[preview log ({pvInfo.logs.length})]</button>
+              <Button variant="ghost" onclick={() => { showPvLog = !showPvLog; }}>[preview log ({pvInfo.logs.length})]</Button>
             </div>
             {#if showPvLog}
               <pre class="dump logview" style="margin-top:6px">{pvInfo.logs.slice(-100).join("\n")}</pre>
@@ -1715,7 +1771,7 @@
           {/if}
         {/if}
           </Tabs.Content>
-          <Tabs.Content value="diff">
+          <Tabs.Content value="diff" tabindex={0}>
         {#if revDiff}
           {#if !revDiff.repo}
             <div class="hint">Not a git repo — no diff available. Browse the files below.</div>
@@ -1732,7 +1788,7 @@
           </Tabs.Content>
           <Tabs.Content value="files">
         <h2>files ({revFiles.length})</h2>
-        {#snippet treenode(node, depth)}
+        {#snippet treenode(node: TreeNode, depth: number)}
           {#each sortedNames(node.dirs) as d}
             {@const sub = node.dirs[d]}
             {@const open = dirOpen(sub.path, depth + 1)}
@@ -1774,12 +1830,12 @@
     {:else}
     <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
       <div class="flex min-w-0 flex-col gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle>system_status</CardTitle>
-            <CardDescription>read-only runtime state</CardDescription>
-          </CardHeader>
-          <CardContent>
+        <div class={cCard}>
+          <div class={cCardHeader}>
+            <h3 class={cCardTitle}>system_status</h3>
+            <p class={cCardDesc}>read-only runtime state</p>
+          </div>
+          <div class={cCardContent}>
             <dl class="grid grid-cols-1 gap-x-6 sm:grid-cols-2">
               <div class="flex items-center justify-between gap-3 border-b border-border py-1.5">
                 <dt class="text-xs text-muted-foreground">engine</dt>
@@ -1788,13 +1844,13 @@
               <div class="flex items-center justify-between gap-3 border-b border-border py-1.5">
                 <dt class="text-xs text-muted-foreground">health</dt>
                 <dd class="text-sm">
-                  {#if meta?.brain?.ok}<Badge variant="success">connected</Badge>
-                  {:else}<Badge variant="destructive">CLI not found</Badge>{/if}
+                  {#if meta?.brain?.ok}<span class={cBadgeSuccess}>connected</span>
+                  {:else}<span class={cBadgeDestructive}>CLI not found</span>{/if}
                 </dd>
               </div>
               <div class="flex items-center justify-between gap-3 border-b border-border py-1.5">
                 <dt class="text-xs text-muted-foreground">mode</dt>
-                <dd class="text-sm">{#if meta?.dryRun}<Badge variant="warning" title="simulation">dry-run</Badge>{:else}<Badge variant="success">live</Badge>{/if}</dd>
+                <dd class="text-sm">{#if meta?.dryRun}<span class={cBadgeWarning} title="simulation">dry-run</span>{:else}<span class={cBadgeSuccess}>live</span>{/if}</dd>
               </div>
               <div class="flex items-center justify-between gap-3 border-b border-border py-1.5">
                 <dt class="text-xs text-muted-foreground">loop tick</dt>
@@ -1805,64 +1861,105 @@
                 <dd class="text-sm">{tasks.length} active · {doneCount} done · {failCount} failed</dd>
               </div>
             </dl>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>configuration</CardTitle>
-            <CardDescription>applies to the next run{#if current?.status === "running"} — brain is working now{/if}</CardDescription>
-          </CardHeader>
-          <CardContent>
+        <div class={cCard}>
+          <div class={cCardHeader}>
+            <h3 class={cCardTitle}>configuration</h3>
+            <p class={cCardDesc}>applies to the next run{#if current?.status === "running"} — brain is working now{/if}</p>
+          </div>
+          <div class={cCardContent}>
             <div class="border-b border-border pb-4">
               <div class="mb-2 text-xs font-medium">model_control</div>
               <div class="mb-3 truncate text-xs text-muted-foreground">{brain ? `${brain.agent} (${brain.agentSource}) · ${brain.bin}${brain.subcommand ? " " + brain.subcommand : " -p"}` : "…"} · {brain?.model || "default CLI"} ({brain?.modelSource || "…"}) · {brain?.effort || "default CLI"} ({brain?.effortSource || "…"})</div>
               <div class="mb-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label for="bagent" class="mb-1 block text-xs font-medium">coding agent</label>
-                  <Select
-                    bind:value={brainAgent}
-                    label="coding agent"
-                    placeholder="— env default —"
-                    options={agentOptions}
-                  />
+                  <Select.Root type="single" bind:value={brainAgent}>
+                    <Select.Trigger aria-label="coding agent" class={cSelectTrigger}>
+                      <Select.Value placeholder="— env default —" class="truncate" />
+                    </Select.Trigger>
+                    <Select.Portal>
+                      <Select.Content class={cSelectContent} sideOffset={4}>
+                        <div class="overflow-y-auto p-1">
+                          {#each agentOptions as o (o.value)}
+                            <Select.Item value={o.value} label={o.label} disabled={o.disabled} class={cSelectItem}>{o.label}</Select.Item>
+                          {:else}
+                            <div class={cSelectEmpty}>no match</div>
+                          {/each}
+                        </div>
+                      </Select.Content>
+                    </Select.Portal>
+                  </Select.Root>
                 </div>
                 <div>
                   <label for="bbin" class="mb-1 block text-xs font-medium">binary (empty = env default)</label>
-                  <Input id="bbin" bind:value={brainBin} placeholder="muse / opencode" autocomplete="off" />
+                  <input id="bbin" bind:value={brainBin} placeholder="muse / opencode" autocomplete="off" class={cInput} />
                 </div>
               </div>
               <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
                 {#if (brain?.catalog?.providers || []).length}
                   <div>
                     <label for="bprov" class="mb-1 block text-xs font-medium">provider</label>
-                    <Select
-                      bind:value={brainProvider}
-                      label="provider"
-                      placeholder="all providers"
-                      options={providerOptions}
-                    />
+                    <Select.Root type="single" bind:value={brainProvider}>
+                      <Select.Trigger aria-label="provider" class={cSelectTrigger}>
+                        <Select.Value placeholder="all providers" class="truncate" />
+                      </Select.Trigger>
+                      <Select.Portal>
+                        <Select.Content class={cSelectContent} sideOffset={4}>
+                          <div class="overflow-y-auto p-1">
+                            {#each providerOptions as o (o.value)}
+                              <Select.Item value={o.value} label={o.label} disabled={o.disabled} class={cSelectItem}>{o.label}</Select.Item>
+                            {:else}
+                              <div class={cSelectEmpty}>no match</div>
+                            {/each}
+                          </div>
+                        </Select.Content>
+                      </Select.Portal>
+                    </Select.Root>
                   </div>
                 {/if}
                 <div>
                   <label for="bmodel" class="mb-1 block text-xs font-medium">model</label>
-                  <Select
-                    bind:value={brainModel}
-                    label="model"
-                    placeholder="— CLI default —"
-                    options={modelOptions}
-                    searchable
-                    searchPlaceholder="search model…"
-                  />
+                  <Select.Root type="single" bind:value={brainModel} bind:open={modelSelOpen}>
+                    <Select.Trigger aria-label="model" class={cSelectTrigger}>
+                      <Select.Value placeholder="— CLI default —" class="truncate" />
+                    </Select.Trigger>
+                    <Select.Portal>
+                      <Select.Content class={cSelectContent} sideOffset={4}>
+                        <div class="shrink-0 border-b border-border p-1">
+                          <input bind:this={modelSearchEl} bind:value={modelQuery} placeholder="search model…" aria-label="search options" autocomplete="off" class="h-8 w-full rounded-sm bg-transparent px-2 text-sm text-white outline-none placeholder:text-muted-foreground" onkeydown={(e) => { if (e.key !== "Escape") e.stopPropagation(); }} />
+                        </div>
+                        <div class="overflow-y-auto p-1">
+                          {#each modelSelItems as o (o.value)}
+                            <Select.Item value={o.value} label={o.label} disabled={o.disabled} class={cSelectItem}>{o.label}</Select.Item>
+                          {:else}
+                            <div class={cSelectEmpty}>no match</div>
+                          {/each}
+                        </div>
+                      </Select.Content>
+                    </Select.Portal>
+                  </Select.Root>
                 </div>
                 <div>
                   <label for="beff" class="mb-1 block text-xs font-medium">reasoning effort</label>
-                  <Select
-                    bind:value={brainEffort}
-                    label="reasoning effort"
-                    placeholder="— CLI default —"
-                    options={[{ value: "", label: "— CLI default —" }, ...(brain?.efforts || []).map((e) => ({ value: e, label: e }))]}
-                  />
+                  <Select.Root type="single" bind:value={brainEffort}>
+                    <Select.Trigger aria-label="reasoning effort" class={cSelectTrigger}>
+                      <Select.Value placeholder="— CLI default —" class="truncate" />
+                    </Select.Trigger>
+                    <Select.Portal>
+                      <Select.Content class={cSelectContent} sideOffset={4}>
+                        <div class="overflow-y-auto p-1">
+                          {#each ([{ value: "", label: "— CLI default —" }, ...(brain?.efforts || []).map((e) => ({ value: e, label: e }))] as SelectOption[]) as o (o.value)}
+                            <Select.Item value={o.value} label={o.label} disabled={o.disabled} class={cSelectItem}>{o.label}</Select.Item>
+                          {:else}
+                            <div class={cSelectEmpty}>no match</div>
+                          {/each}
+                        </div>
+                      </Select.Content>
+                    </Select.Portal>
+                  </Select.Root>
                 </div>
               </div>
             </div>
@@ -1871,35 +1968,39 @@
               <div class="mb-3 text-xs text-muted-foreground">active: {limits ? `${limits.timeoutSeconds}s` : "…"} ({limits?.timeoutSource || "…"})</div>
               <div>
                 <label for="totime" class="mb-1 block text-xs font-medium">timeout per run, seconds{meta?.timeout ? ` (env default ${meta.timeout.seconds}s)` : ""}</label>
-                <Input id="totime" type="number" inputmode="numeric" bind:value={timeoutInput} placeholder={limits ? `e.g. 3600 (min ${limits.min}, max ${limits.max})` : "e.g. 3600"} autocomplete="off" />
+                <input id="totime" type="number" inputmode="numeric" bind:value={timeoutInput} placeholder={limits ? `e.g. 3600 (min ${limits.min}, max ${limits.max})` : "e.g. 3600"} autocomplete="off" class={cInput} />
               </div>
             </div>
-          </CardContent>
-          <CardFooter>
-            <Button size="sm" onclick={saveBrain} disabled={busy === "brain"}>save brain</Button>
-            <Button size="sm" onclick={saveLimits} disabled={busy === "limits"}>save timeout</Button>
+          </div>
+          <div class={cCardFooter}>
+            <Button variant="default" onclick={saveBrain} disabled={busy === "brain"}>save brain</Button>
+            <Button variant="default" onclick={saveLimits} disabled={busy === "limits"}>save timeout</Button>
             {#if brainMsg}<span class="text-xs text-muted-foreground">{brainMsg}</span>{/if}
             {#if limitsMsg}<span class="text-xs text-muted-foreground">{limitsMsg}</span>{/if}
-          </CardFooter>
-        </Card>
+          </div>
+        </div>
       </div>
 
-      <Card class="h-fit">
-        <CardHeader>
-          <CardTitle>laptop</CardTitle>
-          <CardDescription>resource_monitoring</CardDescription>
-        </CardHeader>
-        <CardContent>
+      <div class={`${cCard} h-fit`}>
+        <div class={cCardHeader}>
+          <h3 class={cCardTitle}>laptop</h3>
+          <p class={cCardDesc}>resource_monitoring</p>
+        </div>
+        <div class={cCardContent}>
           {#if metrics}
             <div class="mb-1 flex items-center justify-between text-xs">
               <span class="text-muted-foreground">cpu</span><span class="font-mono text-sm">{metrics.cpuPercent}%</span>
             </div>
-            <Progress value={metrics.cpuPercent} />
+            <Progress.Root value={metrics.cpuPercent} class={cProgress}>
+              <div class={cProgressFill} style={`transform: translateX(-${100 - (100 * (metrics.cpuPercent ?? 0)) / 100}%)`}></div>
+            </Progress.Root>
             <svg class="spark" viewBox="0 0 260 40" preserveAspectRatio="none" aria-hidden="true"><polyline points={spark} /></svg>
             <div class="mt-2 mb-1 flex items-center justify-between text-xs">
               <span class="text-muted-foreground">mem</span><span class="font-mono text-sm">{metrics.memUsedPercent}%</span>
             </div>
-            <Progress value={metrics.memUsedPercent} />
+            <Progress.Root value={metrics.memUsedPercent} class={cProgress}>
+              <div class={cProgressFill} style={`transform: translateX(-${100 - (100 * (metrics.memUsedPercent ?? 0)) / 100}%)`}></div>
+            </Progress.Root>
             <div class="mt-3 grid grid-cols-2 gap-x-4">
               <div class="border-b border-border py-1.5">
                 <div class="text-xs text-muted-foreground">memory</div>
@@ -1929,8 +2030,8 @@
           {:else}
             <span class="text-xs text-muted-foreground">loading metrics…</span>
           {/if}
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     </div>
 
     <div class="grid" style="margin-top:12px">
