@@ -80,6 +80,28 @@ export interface Approval {
   escalatedAt: string | null; // kapan dilempar ke telegram
 }
 
+// Sumber keputusan izin yang sudah selesai (untuk daftar approval).
+export type ApprovalVia = "telegram" | "admin_web" | "AI";
+export type ApprovalStatus = "approved" | "rejected";
+export interface ApprovalRecord {
+  id: string;
+  title: string;
+  status: ApprovalStatus;
+  approver: string;
+  approved_via: ApprovalVia;
+  timestamp: string;
+  // alias kompatibilitas (camelCase)
+  approvedVia?: ApprovalVia;
+  decidedAt?: string;
+  decidedBy?: string;
+}
+
+export type ApprovalItem = ApprovalRecord;
+export type ApprovalHistoryEntry = ApprovalRecord;
+export type ApprovalListItem = ApprovalRecord;
+export type ApprovalListEntry = ApprovalRecord;
+export type ApprovalSource = ApprovalVia;
+
 export interface BrainSetting {
   model: string; // "" = ikut default env/CLI
   effort: string; // "" = ikut default env/CLI
@@ -106,7 +128,11 @@ export interface AltheaState {
   brain: BrainSetting; // override dashboard (PUT /api/brain), berlaku spawn berikutnya
   limits: LimitsSetting; // override dashboard (PUT /api/limits), berlaku spawn berikutnya
   stack: StackTask[]; // tumpukan dinamis: puncak = elemen terakhir (LIFO)
-  approvals: Approval[];
+  approvals: Approval[]; // izin yang masih menunggu keputusan
+  approvalHistory: ApprovalRecord[]; // izin yang sudah diputuskan
+  approvalList: ApprovalRecord[]; // alias
+  approvalsHistory: ApprovalRecord[]; // alias
+  approvalRecords: ApprovalRecord[]; // alias
   projects: Project[]; // registry project di workspace/
   logs: Record<string, string[]>; // taskId → baris output Muse (maks 5 tugas × 200 baris)
   activity: Record<string, TaskActivity[]>; // taskId → feed aktivitas (maks 5 tugas × 120)
@@ -123,6 +149,10 @@ export function defaultState(): AltheaState {
     limits: { timeoutSeconds: 0 },
     stack: [],
     approvals: [],
+    approvalHistory: [],
+    approvalList: [],
+    approvalsHistory: [],
+    approvalRecords: [],
     projects: [],
     logs: {},
     activity: {},
@@ -144,6 +174,14 @@ export function loadState(path: string): AltheaState {
     const s = { ...defaultState(), ...JSON.parse(raw) } as AltheaState;
     if (!Array.isArray(s.stack)) s.stack = [];
     if (!Array.isArray(s.approvals)) s.approvals = [];
+    if (!Array.isArray(s.approvalHistory)) s.approvalHistory = [];
+    if (!Array.isArray(s.approvalList)) s.approvalList = s.approvalHistory;
+    if (!Array.isArray(s.approvalsHistory)) s.approvalsHistory = s.approvalHistory;
+    if (!Array.isArray(s.approvalRecords)) s.approvalRecords = s.approvalHistory;
+    // normalisasi alias agar menunjuk data sama
+    s.approvalList = s.approvalHistory;
+    s.approvalsHistory = s.approvalHistory;
+    s.approvalRecords = s.approvalHistory;
     if (!Array.isArray(s.projects)) s.projects = [];
     if (!s.logs || typeof s.logs !== "object") s.logs = {};
     if (!s.activity || typeof s.activity !== "object") s.activity = {};
@@ -213,6 +251,22 @@ export function loadState(path: string): AltheaState {
       if (a.stage !== "web" && a.stage !== "telegram") a.stage = "telegram";
       if (a.escalatedAt === undefined) a.escalatedAt = a.createdAt;
     }
+    // Migrasi/normalisasi record approval yang sudah diputuskan.
+    s.approvalHistory = (s.approvalHistory || []).map((r: any) => {
+      const rec = { ...r };
+      if (!rec.approved_via && rec.approvedVia) rec.approved_via = rec.approvedVia;
+      if (!rec.approvedVia && rec.approved_via) rec.approvedVia = rec.approved_via;
+      if (!rec.timestamp && rec.decidedAt) rec.timestamp = rec.decidedAt;
+      if (!rec.decidedAt && rec.timestamp) rec.decidedAt = rec.timestamp;
+      if (!rec.approver && rec.decidedBy) rec.approver = rec.decidedBy;
+      if (!rec.decidedBy && rec.approver) rec.decidedBy = rec.approver;
+      if (rec.approved_via === "auto") rec.approved_via = "AI"; // alias lama
+      if (rec.approvedVia === "auto") rec.approvedVia = "AI";
+      return rec as ApprovalRecord;
+    });
+    s.approvalList = s.approvalHistory;
+    s.approvalsHistory = s.approvalHistory;
+    s.approvalRecords = s.approvalHistory;
     return s;
   } catch {
     return defaultState();

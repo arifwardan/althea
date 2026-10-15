@@ -2,7 +2,7 @@
 // - push(): tambah kerja (bisa sub-tugas saat runtime → "dinamis").
 // - pop(): ambil puncak untuk dikerjakan. Selesai → done, gagal → failed.
 // - Tugas menunggu izin TIDAK dibuang: status waiting_approval, tetap di puncak.
-import type { AltheaState, DecidedBy, StackTask } from "./state.js";
+import type { AltheaState, DecidedBy, StackTask, ApprovalRecord, ApprovalStatus, ApprovalVia } from "./state.js";
 import { uid, logEvent } from "./state.js";
 
 export function pushTask(
@@ -145,7 +145,26 @@ export function resolveApproval(
 ): boolean {
   const i = s.approvals.findIndex((a) => a.id === id);
   if (i < 0) return false;
+  const pending = s.approvals[i];
   s.approvals.splice(i, 1);
+  const via: "telegram" | "admin_web" | "AI" =
+    by === "admin-telegram" ? "telegram" : by === "auto" ? "AI" : "admin_web";
+  const record: ApprovalRecord = {
+    id,
+    title: pending?.title || (s.stack.find((x) => x.id === id)?.title || id),
+    status: ok ? "approved" : "rejected",
+    approver: by,
+    approved_via: via,
+    timestamp: new Date().toISOString(),
+    approvedVia: via,
+    decidedAt: new Date().toISOString(),
+    decidedBy: by,
+  };
+  if (!Array.isArray(s.approvalHistory)) s.approvalHistory = [];
+  s.approvalHistory.push(record);
+  if (Array.isArray(s.approvalList)) s.approvalList = s.approvalHistory;
+  if (Array.isArray(s.approvalsHistory)) s.approvalsHistory = s.approvalHistory;
+  if (Array.isArray(s.approvalRecords)) s.approvalRecords = s.approvalHistory;
   const t = s.stack.find((x) => x.id === id);
   if (!t) return true;
   t.updatedAt = new Date().toISOString();
@@ -195,6 +214,10 @@ export function deleteTask(s: AltheaState, id: string): boolean {
   if (i < 0) return false;
   s.stack.splice(i, 1);
   s.approvals = s.approvals.filter((a) => a.id !== id);
+  s.approvalHistory = (s.approvalHistory || []).filter((a) => a.id !== id);
+  s.approvalList = s.approvalHistory;
+  s.approvalsHistory = s.approvalHistory;
+  s.approvalRecords = s.approvalHistory;
   delete s.logs[id];
   delete s.activity[id];
   logEvent(s, `delete ${id}`);
@@ -232,6 +255,29 @@ export function boundToDir(prompt: string, dir?: string): string {
 }
 
 /** Batalkan tugas aktif (queued/running/waiting_approval) → failed. */
+/**
+ * Query/list approval records (sudah diputuskan) untuk Task menu.
+ * Mendukung filter opsional status ("approved"/"rejected") dan
+ * sumber ("telegram"/"admin_web"/"AI", juga param `via`).
+ */
+export function listApprovals(
+  s: AltheaState,
+  filters?: { status?: ApprovalStatus | string; source?: ApprovalVia | string; via?: ApprovalVia | string },
+): ApprovalRecord[] {
+  if (!s || !Array.isArray(s.approvalHistory)) return [];
+  let list = s.approvalHistory;
+  const status = filters?.status;
+  const source = filters?.source ?? filters?.via;
+  if (status) list = list.filter((r) => r.status === status);
+  if (source) list = list.filter((r) => r.approved_via === source || r.approvedVia === source);
+  return [...list];
+}
+
+export const getApprovals = listApprovals;
+export const queryApprovals = listApprovals;
+export const fetchApprovals = listApprovals;
+export const loadApprovals = listApprovals;
+
 export function cancelTask(s: AltheaState, id: string, note = "cancelled by admin"): boolean {
   const t = s.stack.find((x) => x.id === id);
   if (!t) return false;

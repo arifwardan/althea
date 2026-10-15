@@ -9,6 +9,7 @@
   import type {
     AltheaState,
     Approval,
+    ApprovalRecord,
     BrainInfo,
     LimitsInfo,
     McpInfo,
@@ -44,6 +45,9 @@
   let meta = $state<MetaInfo | null>(null);
   let snap = $state<AltheaState | null>(null);
   let report = $state("");
+  let approvals = $state<ApprovalRecord[]>([]);
+  let approvalsLoading = $state(false);
+  let approvalsErr = $state("");
   let metrics = $state<Metrics | null>(null);
   let brain = $state<BrainInfo | null>(null);
   let brainModel = $state("");
@@ -269,6 +273,7 @@
         (await api("/api/metrics")).json(),
       ]);
       snap = s;
+      approvals = (s?.approvalHistory as ApprovalRecord[]) || approvals;
       report = rep;
       projects = projs;
       metrics = met;
@@ -276,6 +281,20 @@
       authed = true;
     } catch {
       /* authed=false ditangani api() */
+    }
+  }
+
+  async function loadApprovals() {
+    approvalsLoading = true;
+    approvalsErr = "";
+    try {
+      const r = await api("/api/approvals");
+      if (!r.ok) throw new Error("failed");
+      approvals = (await r.json()) as ApprovalRecord[];
+    } catch (e) {
+      approvalsErr = e instanceof Error ? e.message : "failed to load approvals";
+    } finally {
+      approvalsLoading = false;
     }
   }
 
@@ -377,6 +396,7 @@
         return;
       }
       pw = "";
+      await loadApprovals();
       await load();
       await loadBrain();
       await loadLimits();
@@ -961,6 +981,7 @@
       .then((r) => r.json())
       .then((m) => { meta = m; })
       .catch(() => {});
+    loadApprovals();
     load();
     loadBrain();
     loadLimits();
@@ -1272,10 +1293,37 @@
     {:else if view === "tasks"}
     <div class="grid" style="margin-top:0">
       <div class="panel {snap.approvals.length ? 'alert' : ''}">
-        <h2>pending_approvals</h2>
-        {#if !snap.approvals.length}
-          <span class="v-dim">empty — web {meta?.approvalWebMinutes ?? 3} min → telegram {meta?.approvalTelegramMinutes ?? 3} min → auto.</span>
+        <h2>approvals</h2>
+        {#if approvalsLoading}
+          <span class="v-dim">loading approvals…</span>
+        {:else if approvalsErr}
+          <span class="v-err">✕ {approvalsErr}</span>
+        {:else if !approvals.length}
+          <span class="v-dim">no approvals yet.</span>
         {:else}
+          {#each approvals as a (a.id + a.timestamp)}
+            <div class="approval">
+              <div class="meta">
+                {#if a.approved_via === "telegram"}
+                  <span class="v-ok" title="approved via Telegram">📱 telegram</span>
+                {:else if a.approved_via === "admin_web"}
+                  <span class="v-ok" title="approved via admin web">🌐 admin web</span>
+                {:else}
+                  <span class="v-warn" title="approved by AI">🤖 AI</span>
+                {/if}
+                · {a.id}
+              </div>
+              <div><strong>{a.title}</strong>
+                <span class={a.status === "approved" ? "v-ok" : "v-err"} style="margin-left:6px">
+                  {a.status === "approved" ? "✓ approved" : "✕ rejected"}
+                </span>
+              </div>
+              <div class="meta">approver: {a.approver} · {a.timestamp}</div>
+            </div>
+          {/each}
+        {/if}
+        {#if snap.approvals.length}
+          <h2 style="margin-top:14px">pending</h2>
           {#each snap.approvals as a (a.id)}
             <div class="approval">
               <div class="meta">[{a.stage}] {a.id}</div>

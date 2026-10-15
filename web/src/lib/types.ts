@@ -4,6 +4,10 @@
 import type {
   AltheaState,
   Approval,
+  ApprovalRecord,
+  ApprovalItem,
+  ApprovalListItem,
+  ApprovalVia,
   BrainSetting,
   LimitsSetting,
   Project,
@@ -15,6 +19,10 @@ import type { Metrics } from "../../../src/metrics";
 export type {
   AltheaState,
   Approval,
+  ApprovalRecord,
+  ApprovalItem,
+  ApprovalListItem,
+  ApprovalVia,
   BrainSetting,
   LimitsSetting,
   Project,

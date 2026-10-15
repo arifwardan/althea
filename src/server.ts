@@ -6,7 +6,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import type { AltheaState } from "./state.js";
 import { config } from "./config.js";
-import { pushTask, pushFollowup, resolveApproval, cancelTask, correctTask, deleteTask, requeueTask, markReviewed } from "./workflow.js";
+import { pushTask, pushFollowup, resolveApproval, cancelTask, correctTask, deleteTask, requeueTask, markReviewed, listApprovals } from "./workflow.js";
 import {
   killRunning, setBrainOverride, effectiveBrain, listBrainModels,
   normalizeEffort, normalizeModel, normalizeBin, normalizeAgent, BRAIN_EFFORTS,
@@ -307,6 +307,17 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
       if (!authorized(req)) return json(res, { error: "login required" }, 401);
 
       if (req.method === "GET" && path === "/api/state") return json(res, s);
+      if (req.method === "GET" && path === "/api/approvals") {
+        const url = new URL(req.url || "/", "http://x");
+        const list = listApprovals(s, {
+          status: url.searchParams.get("status") || undefined,
+          source: url.searchParams.get("source") || url.searchParams.get("via") || undefined,
+        });
+        return json(res, list);
+      }
+      if (req.method === "GET" && path === "/api/approval-history") {
+        return json(res, Array.isArray(s.approvalHistory) ? s.approvalHistory : []);
+      }
       if (req.method === "GET" && path === "/api/report") {
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
         res.end(buildReport(s));
