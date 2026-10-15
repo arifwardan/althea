@@ -131,7 +131,7 @@
   let projPrompt = $state("");
   let projRepo = $state("");
   let projFile = $state<File | null>(null);
-  let projStack = $state<Record<string, string>>({ fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" });
+  let projStack = $state<Record<string, string | Record<string, string | undefined>>>({ fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind", extras: {} });
   let projCats = $state<Record<string, string[]>>({ fungsi: [], bisnis: [], arsitektur: [], target: [], interaksi: [] });
   let projErr = $state("");
   let projMsg = $state("");
@@ -161,6 +161,7 @@
     { id: "fe", label: "frontend" },
     { id: "db", label: "database" },
     { id: "css", label: "framework css" },
+    { id: "extras", label: "extra tools (optional)" },
   ];
   const CAT_DIMS = ["fungsi", "bisnis", "arsitektur", "target", "interaksi"];
   function toggleCat(dim: string, id: string) {
@@ -178,7 +179,13 @@
     return meta?.categoryTaxonomy?.[dim]?.find((o) => o.id === id)?.label || id;
   }
   function setStack(dim: string, id: string) {
-    projStack[dim] = id;
+    if (dim === "extras") {
+      const cur = (projStack.extras as Record<string, string | undefined>) || {};
+      const ex = (projStack.extras as Record<string, string | undefined>) || {};
+      projStack.extras = { ...ex, [id]: ex[id] ? undefined : id } as Record<string, string | undefined>;
+    } else {
+      projStack[dim] = id;
+    }
   }
   function shortOpt(o: { label: string }) {
     return o.label.split(" (")[0];
@@ -482,7 +489,7 @@
       projPrompt = "";
       projRepo = "";
       projFile = null;
-      projStack = { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" };
+      projStack = { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind", extras: {} };
       projCats = { fungsi: [], bisnis: [], arsitektur: [], target: [], interaksi: [] };
       const fi = document.getElementById("pfile") as HTMLInputElement | null;
       if (fi) fi.value = "";
@@ -1538,7 +1545,12 @@
                 <div class="stackdim">{d.label}</div>
                 <div class="optbadges">
                   {#each meta.stackOptions[d.id] as o}
-                    <Button variant="pick" active={projStack[d.id] === o.id} title={o.label} aria-pressed={projStack[d.id] === o.id} onclick={() => setStack(d.id, o.id)}>{shortOpt(o)}</Button>
+                    {#if d.id === "extras"}
+                      {@const ex = projStack.extras as Record<string, string | undefined> || {}}
+                      <Button variant="pick" active={!!ex[o.id]} title={o.label} aria-pressed={!!ex[o.id]} onclick={() => setStack(d.id, o.id)}>{shortOpt(o)}</Button>
+                    {:else}
+                      <Button variant="pick" active={projStack[d.id] === o.id} title={o.label} aria-pressed={projStack[d.id] === o.id} onclick={() => setStack(d.id, o.id)}>{shortOpt(o)}</Button>
+                    {/if}
                   {/each}
                 </div>
               </div>

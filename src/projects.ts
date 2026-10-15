@@ -40,9 +40,10 @@ export function detectStack(dir: string): string {
  * Tech stack per lapisan. Default Althea = Laravel (BE) + Svelte (FE) +
  * PostgreSQL (DB) + Tailwind (CSS); kombinasi default disajikan via lerd.
  */
-export interface StackSpec { fe: string; be: string; db: string; css: string; }
+export interface StackSpec { fe: string; be: string; db: string; css: string; extras?: Record<string, string | undefined>; }
 
-export const DEFAULT_STACK: StackSpec = { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" };
+export const DEFAULT_STACK: StackSpec = { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind", extras: {} };
+export const DEFAULT_STACK_LAYER: StackSpec = { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind", extras: {} };
 
 export const STACK_OPTIONS: Record<keyof StackSpec, Array<{ id: string; label: string }>> = {
   fe: [
@@ -70,6 +71,13 @@ export const STACK_OPTIONS: Record<keyof StackSpec, Array<{ id: string; label: s
     { id: "bootstrap", label: "Bootstrap" },
     { id: "plain", label: "Plain CSS" },
   ],
+  extras: [
+    { id: "orm-prisma", label: "Prisma (ORM)" },
+    { id: "orm-drizzle", label: "Drizzle (ORM)" },
+    { id: "obs-otel", label: "OpenTelemetry" },
+    { id: "obs-prom", label: "Prometheus + Grafana" },
+    { id: "obs-loki", label: "Loki + Grafana" },
+  ],
 };
 
 const STACK_IDS: Record<keyof StackSpec, string[]> = {
@@ -77,6 +85,7 @@ const STACK_IDS: Record<keyof StackSpec, string[]> = {
   be: STACK_OPTIONS.be.map((o) => o.id),
   db: STACK_OPTIONS.db.map((o) => o.id),
   css: STACK_OPTIONS.css.map((o) => o.id),
+  extras: STACK_OPTIONS.extras.map((o) => o.id),
 };
 
 /** Petakan string stack lama ("laravel"|"node"|...) ke spec per lapisan. */
@@ -97,11 +106,20 @@ export function normalizeStackSpec(v: unknown): StackSpec {
     return { ...DEFAULT_STACK };
   }
   const o = (v && typeof v === "object" ? v : {}) as Partial<StackSpec>;
-  const pick = (k: keyof StackSpec): string => {
+  const pick = (k: "fe" | "be" | "db" | "css"): string => {
     const t = String(o[k] || "").trim().toLowerCase();
     return STACK_IDS[k].includes(t) ? t : DEFAULT_STACK[k];
   };
-  return { fe: pick("fe"), be: pick("be"), db: pick("db"), css: pick("css") };
+  const extras: Record<string, string | undefined> = {};
+  const rawExtras = o.extras;
+  if (rawExtras && typeof rawExtras === "object") {
+    for (const dim of Object.keys(rawExtras)) {
+      const key = String(dim);
+      const val = STACK_OPTIONS.extras.find((opt) => opt.id === key);
+      if (val) extras[key] = val.id;
+    }
+  }
+  return { fe: pick("fe"), be: pick("be"), db: pick("db"), css: pick("css"), extras };
 }
 
 /** Kombinasi default penuh (keempat lapisan). */
