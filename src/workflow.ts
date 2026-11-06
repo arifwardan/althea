@@ -36,7 +36,9 @@ export function pushTask(
 
 /**
  * Koreksi tugas yang sedang berjalan/antre: arahan admin ditempel ke prompt,
- * progres graph dibuang (plan ulang bersih), tugas kembali queued.
+ * plan/feedback graph dibuang (plan ulang bersih) — tapi handoff pekerjaan
+ * DIPERTAHAN: file di disk tak hilang, dan run berikutnya perlu tahu apa yang
+ * sudah ada agar model tak mengulang dari nol.
  * Pemanggil menghentikan proses yang sedang jalan bila ada.
  * Hanya untuk status running/queued; koreksi kosong/hasil selesai → false.
  */
@@ -46,7 +48,8 @@ export function correctTask(s: AltheaState, id: string, correction: string): boo
   if (!t || !text) return false;
   if (t.status !== "running" && t.status !== "queued") return false;
   t.prompt = `${t.prompt}\n\nAdmin correction: ${text}`;
-  t.graph = undefined;
+  const handoff = t.graph?.handoff;
+  t.graph = handoff ? { handoff } : undefined;
   t.status = "queued";
   t.updatedAt = new Date().toISOString();
   logEvent(s, `correct ${id} (requeued)`);

@@ -109,6 +109,16 @@ describe("correctTask (koreksi mid-run)", () => {
     assert.equal(t.graph, undefined);
     assert.equal(peek(s)?.id, t.id); // langsung bisa dikerjakan lagi
   });
+  it("koreksi mempertahankan handoff pekerjaan (plan/iteration tetap dibuang)", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    t.status = "running";
+    t.graph = { plan: "rencana lama", iteration: 2, handoff: "sudah separuh" };
+    assert.equal(correctTask(s, t.id, "tambah fitur cetak"), true);
+    assert.equal(t.graph?.plan, undefined);
+    assert.equal(t.graph?.iteration, undefined);
+    assert.equal(t.graph?.handoff, "sudah separuh"); // file di disk tak hilang → run berikutnya lanjut
+  });
   it("queued ikut bisa dikoreksi; attempts tak berubah", () => {
     const s = defaultState();
     const t = pushTask(s, "X", "p");

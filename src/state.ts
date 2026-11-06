@@ -19,6 +19,7 @@ export interface GraphProgress {
   plan?: string;
   iteration?: number;
   feedback?: string;
+  handoff?: string; // ringkasan pekerjaan run sebelumnya (resume ganti model/provider tanpa kehilangan konteks)
 }
 
 export interface StackTask {
@@ -139,6 +140,7 @@ export interface AltheaState {
   usage: Usage; // total pemakaian runtime ini
   sleepUntil: string | null; // ISO atau null
   events: string[]; // log ringkas (maks 200)
+  dbNotified?: string; // perintah manual role DB yang sudah dikirim ke Telegram (anti-spam tiap boot)
   bootedAt: string;
 }
 

@@ -4,6 +4,7 @@
 // loop utama menanganinya (limit = gagalkan tugas, kill = kill-switch).
 import { StateGraph, START, END, Annotation } from "@langchain/langgraph";
 import { runClaude, type ClaudeResult } from "../claude.js";
+import { buildHandoff, buildResumeSection, HANDOFF_MAX_CHARS } from "../handoff.js";
 import { boundToDir } from "../workflow.js";
 import { contextTree, projectDiff, readStandards, prdSlice } from "../projects.js";
 import { runVerifyGates, isDocsOnlyDiff } from "../verify.js";
@@ -29,7 +30,7 @@ export type RunFn = (
   onActivity?: (a: { kind: string; text: string; tool?: string; ok?: boolean }) => void,
 ) => Promise<ClaudeResult>;
 
-export interface GraphProgress { plan?: string; iteration?: number; feedback?: string }
+export interface GraphProgress { plan?: string; iteration?: number; feedback?: string; handoff?: string }
 
 export type PlanMode = "llm" | "slice"; // slice = rencana dari potongan instruksi, 0 token LLM
 export type ReviewMode = "llm" | "gate"; // gate = cek diff oleh sistem, 0 token LLM
@@ -202,6 +203,11 @@ export function buildGraph(opts: {
         cwd, line("coder")
       );
       throwIfSpecial(r);
+      // Simpan handoff tiap ronde selesai: bila limit datang di ronde/tes
+      // berikutnya, run baru (model/provider lain) tahu apa yang sudah jadi
+      // dan melanjutkan — bukan mengulang dari nol (lihat handoff.ts).
+      const handoff = buildHandoff([...s.outputs, `[implement]\n${r.output}`]);
+      if (handoff) onProgress?.({ handoff });
       return { outputs: [`[implement]\n${r.output}`] };
     })
     .addNode("reviewer", async (s: S) => {
@@ -297,7 +303,21 @@ export async function runGraphTask(o: GraphOpts): Promise<GraphResult> {
   const standards = o.task.project ? readStandards(o.task.project) : null;
   // FR-3.8: potongan PRD untuk fase eksekusi (bukan fase prd yang justru menulisnya).
   const slice = o.task.project && o.task.phase && o.task.phase !== "prd" ? prdSlice(o.task.project) : null;
+  // Resume dari run sebelumnya (plan/handoff tersimpan — lihat handoff.ts):
+  // suntik status kerja + diff di disk agar run baru (ganti model/provider
+  // setelah limit, retry timeout) MELANJUTKAN, bukan baca PRD dari nol.
+  const prev = o.task.graph;
+  const isResume = !!(prev?.plan || prev?.feedback || prev?.handoff);
+  let diffStat = "";
+  if (isResume && o.task.project) {
+    try {
+      const d = await projectDiff(o.task.project);
+      if (d.repo) diffStat = (d.stat || "").slice(0, 1500);
+    } catch { /* tanpa diff pun resume tetap jalan */ }
+  }
+  const resume = buildResumeSection((prev?.handoff || "").slice(0, HANDOFF_MAX_CHARS), diffStat);
   const extras = [
+    resume,
     standards ? `<PROJECT STANDARDS (must follow):>\n${standards}\n</PROJECT STANDARDS>` : "",
     slice ? `<PRD SUMMARY (read the full PRD.md only if this slice is insufficient):>\n${slice}\n</PRD SUMMARY>` : "",
   ].filter(Boolean).join("\n\n");

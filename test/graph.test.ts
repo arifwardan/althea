@@ -146,6 +146,75 @@ describe("runGraphTask", () => {
   });
 });
 
+describe("handoff resume (ganti model/provider di tengah tugas)", () => {
+  it("happy path → handoff berisi ringkasan implement tersimpan di task.graph", async () => {
+    const t = freshTask();
+    const { run } = mock((p) =>
+      ok(p.startsWith("You are a planner") ? "1. a"
+        : p.startsWith("You are an implementer") ? "auth selesai, tinggal bagian bayar" : "APPROVED"));
+    const g = await runGraphTask({ task: t, maxRounds: 3, run });
+    assert.equal(g.approved, true);
+    assert.match(t.graph?.handoff || "", /auth selesai, tinggal bagian bayar/);
+  });
+
+  it("limit setelah ronde implement → run ulang (model baru) LANJUT dari handoff", async () => {
+    const t = freshTask();
+    // Run 1: plan + implement sukses, lalu review kena limit provider.
+    const first = mock((p) =>
+      p.startsWith("You are a strict reviewer")
+        ? { ...ok(""), ok: false, hitLimit: true, retryAfterMs: null }
+        : ok(p.startsWith("You are a planner") ? "1. a" : "bagian login selesai"));
+    const g1 = await runGraphTask({ task: t, maxRounds: 3, run: first.run });
+    assert.equal(g1.hitLimit, true);
+    assert.equal(t.graph?.plan, "1. a");
+    assert.match(t.graph?.handoff || "", /bagian login selesai/);
+
+    // Run 2: proses CLI baru (admin ganti model/provider) — prompt sama,
+    // tapi handoff disuntik supaya tak mengulang dari nol.
+    const second = mock((p) => ok(p.startsWith("You are an implementer") ? "lanjut bagian bayar" : "APPROVED"));
+    const g2 = await runGraphTask({ task: t, maxRounds: 3, run: second.run });
+    assert.equal(g2.approved, true);
+    const impl = second.calls.find((p) => p.startsWith("You are an implementer")) as string;
+    assert.match(impl, /WORK ALREADY DONE/);
+    assert.match(impl, /bagian login selesai/);
+    assert.match(impl, /do NOT start over/);
+    assert.equal(second.calls.filter((p) => p.startsWith("You are a planner")).length, 0);
+  });
+
+  it("resume ber-project → diff yang sudah ada di disk ikut disuntik", async (tt) => {
+    const { execSync } = await import("node:child_process");
+    try {
+      execSync("git --version", { stdio: "ignore" });
+    } catch {
+      tt.skip("git tidak tersedia");
+      return;
+    }
+    const prevWs = config.workspaceDir;
+    const tmp = mkdtempSync(join(tmpdir(), "althea-graph-handoff-"));
+    try {
+      config.workspaceDir = tmp;
+      const dir = join(tmp, "kasir");
+      mkdirSync(dir, { recursive: true });
+      execSync("git init -q", { cwd: dir, stdio: "ignore" });
+      execSync("git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init", { cwd: dir, stdio: "ignore" });
+      writeFileSync(join(dir, "app.js"), "console.log(1)"); // tak ter-commit → muncul di stat
+      const t = pushTask(defaultState(), "T", "kerjakan X", "", "kasir");
+      t.graph = { plan: "P" }; // resume: plan sudah ada dari run sebelumnya
+      const { run, calls } = mock((p) => ok(p.startsWith("You are a strict reviewer") ? "APPROVED" : "lanjut"));
+      await runGraphTask({
+        task: t, cwd: dir, maxRounds: 2, run, verify: false,
+        getDiff: async () => "diff --git a/f b/f\n+1",
+      });
+      const impl = calls.find((p) => p.startsWith("You are an implementer")) as string;
+      assert.match(impl, /CHANGES ALREADY ON DISK/);
+      assert.match(impl, /app\.js/);
+    } finally {
+      config.workspaceDir = prevWs;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("inputChars", () => {
   it("graph menghitung total karakter prompt node", async () => {
     const t = freshTask();
