@@ -167,3 +167,22 @@ workspace/        rumah semua project (di luar git)
 - Font JetBrains Mono (latin 400/700, woff2, ~43 KB) — unduhan Fontsource CDN,
   lisensi SIL Open Font License 1.1, disajikan lokal dari `web/src/assets/fonts/`.
 - Logo/favicon `>_`: SVG orisinal di `web/public/favicon.svg`.
+
+## Lisensi
+
+Althea dilisensikan di bawah **GNU Affero General Public License v3.0 or later**
+(AGPL-3.0-or-later) — lihat file [`LICENSE`](LICENSE).
+
+Ketentuan ketat yang perlu diketahui:
+
+- **Copyleft penuh**: modifikasi apa pun harus dirilis dengan lisensi yang sama
+  (AGPL-3.0), lengkap dengan source code-nya.
+- **Berlaku juga lewat jaringan**: menjalankan versi termodifikasi Althea sebagai
+  layanan web/VPS wajib menyediakan source code-nya kepada pemakainya
+  (bab 13 AGPL) — bukan hanya saat mendistribusikan binernya.
+- **Tanpa warranty dan tanpa dukungan komersial** dari penulis.
+- Dependensi pihak ketiga (MIT/Apache-2.0/SIL OFL) tetap sesuai lisensinya
+  masing-masing; lisensi ini berlaku untuk kode Althea sendiri.
+
+Kecuali dinyatakan lain pada file tertentu, semua kode di repo ini memakai
+lisensi tersebut.
