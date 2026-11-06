@@ -10,17 +10,41 @@ import { processEscalations } from "./escalation.js";
 import { isSleeping, forceWake } from "./sleeper.js";
 import { runClaude, brainSummary, effectiveBrain, effectiveTimeoutSeconds } from "./claude.js";
 import { checkBrain } from "./metrics.js";
-import { projectDir } from "./projects.js";
+import { projectDir, projectDiff } from "./projects.js";
+import { buildResumeSection, HANDOFF_MAX_CHARS } from "./handoff.js";
 import { advancePipeline, pipelineOnFail, graphModeForPhase, reviewBriefForPhase } from "./pipeline.js";
 import { pollTelegram, notifyAdmins, askApproval } from "./telegram.js";
 import { startServer } from "./server.js";
 import { buildReport } from "./report.js";
 import { syncProjectMcps } from "./mcp.js";
+import { ensureDbRole } from "./db.js";
 
 const state = loadState(config.statePath);
 const save = () => saveState(config.statePath, state);
 
 logEvent(state, `boot (stack: ${state.stack.length}, approval: ${state.approvals.length})`);
+// Kredensial DB bersama: user default "althea", password default "password"
+// (diubah lewat .env DB_PASSWORD). Pastikan role ada di pgsql lokal
+// (best-effort, jangan blokir boot).
+void ensureDbRole().then(async (r) => {
+  logEvent(state, r.ok ? `db role "${config.dbUser}" ready (${r.how})` : `db role "${config.dbUser}" not created: ${r.error}`);
+  let notify = false;
+  if (r.ok) {
+    state.dbNotified = undefined; // beres → reset penanda (gagal lagi nanti → beri tahu lagi)
+  } else if (r.manual && state.dbNotified !== r.manual) {
+    // Gagal = app tak bisa konek DB → beri tahu admin SEKALI per kondisi
+    // (restart berulang / tsx watch tak spam). Perintah tanpa password —
+    // password diambil dari .env saat dieksekusi.
+    state.dbNotified = r.manual;
+    notify = true;
+  }
+  save();
+  if (notify) {
+    await notifyAdmins(
+      `PostgreSQL role "${config.dbUser}" couldn't be created automatically — every generated app needs it.\nRun once from the Althea folder:\n\n${r.manual}`
+    );
+  }
+});
 save();
 startServer(state, save, config.port, config.host);
 
@@ -165,7 +189,21 @@ async function tick(): Promise<void> {
     return { ok: true, output: g.outputs.join("\n"), hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: false };
   };
   try {
-    const askPrompt = top.askOnly ? buildAskPrompt(top.prompt) : top.prompt;
+    let askPrompt = top.askOnly ? buildAskPrompt(top.prompt) : top.prompt;
+    // Mode single-shot: run sebelumnya (limit → ganti model/provider, retry
+    // timeout) menyimpan handoff; disuntik agar run baru MELANJUTKAN, bukan
+    // mulai dari nol. Graph mode mengurus handoff-nya sendiri di runGraphTask.
+    if (!config.graphEnabled && top.attempts > 1) {
+      let stat = "";
+      if (top.project) {
+        try {
+          const d = await projectDiff(top.project);
+          if (d.repo) stat = (d.stat || "").slice(0, 1500);
+        } catch { /* tanpa diff pun resume tetap jalan */ }
+      }
+      const sec = buildResumeSection((top.graph?.handoff || "").slice(0, HANDOFF_MAX_CHARS), stat);
+      if (sec) askPrompt = `${askPrompt}\n\n${sec}`;
+    }
     // Mode single-shot: kungkung juga (graph mode sudah dikungkung di runGraphTask).
     const shotPrompt = cwd ? boundToDir(askPrompt, cwd) : askPrompt;
     const r = config.graphEnabled ? await runGraphMode() : await runClaude(shotPrompt, cwd, pushLine, pushActivity);
@@ -175,6 +213,10 @@ async function tick(): Promise<void> {
     if (!top.usage) top.usage = emptyUsage();
     addRun(top.usage, charsIn, charsOut);
     addRun(state.usage, charsIn, charsOut);
+    // Simpan handoff single-shot (ekor transkrip) untuk run lanjutan berikutnya.
+    if (!config.graphEnabled && r.output) {
+      top.graph = { ...(top.graph || {}), handoff: r.output.slice(-2000) };
+    }
     save(); // pastikan log lengkap tersimpan saat run selesai
     if (r.cancelled) return; // kill-switch: state sudah diurus endpoint cancel
     if (!shouldApplyRunResult(top)) {

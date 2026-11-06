@@ -96,10 +96,19 @@ describe("transisi fase", () => {
       categories: { fungsi: ["e-commerce"], interaksi: ["transaksional"] },
     });
     assert.match(prd.prompt, /BE: laravel, FE: svelte, DB: postgresql, CSS: tailwind/);
+    // PostgreSQL lokal (tak pernah install) + kredensial bersama ikut prompt.
+    assert.match(prd.prompt, /NEVER install, download, or start PostgreSQL/);
+    assert.match(prd.prompt, /DB_USER=/);
+    assert.match(prd.prompt, /DB_PASSWORD=/);
+    assert.match(prd.prompt, /do NOT create roles/);
     assert.match(prd.prompt, /fungsi: e-commerce/);
     assert.match(prd.prompt, /interaksi: transaksional/);
     const mvp = buildPhasePrompt("mvp", "pos kasir", { stack: { be: "python" } });
     assert.match(mvp.prompt, /BE: python/);
+    // DB default (postgresql) → instruksi db ikut; stack non-pg tetap bersih.
+    assert.match(mvp.prompt, /NEVER install, download, or start PostgreSQL/);
+    const sqlite = buildPhasePrompt("mvp", "catatan", { stack: { db: "sqlite" } });
+    assert.doesNotMatch(sqlite.prompt, /NEVER install, download, or start PostgreSQL/);
     const kosong = buildPhasePrompt("prd", "pos kasir", {});
     assert.match(kosong.prompt, /BE: laravel/);
     assert.match(kosong.prompt, /not set/);

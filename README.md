@@ -14,6 +14,20 @@ Backend satu dependensi kecil (`adm-zip`, untuk upload); dashboard Svelte (~110 
 Kesimpulan: mulai **Node+TS** agar cepat hidup; Go tetap opsi rewrite bila sudah stabil.
 Dashboard memakai **Svelte 5 + Vite** (build statis ±100 KB, tanpa framework runtime berat).
 
+## PostgreSQL (credential bersama)
+
+App buatan **tidak pernah diminta menginstall PostgreSQL** — Althea memakai
+pgsql lokal yang sudah terinstall (`DB_HOST`/`DB_PORT`, default
+`127.0.0.1:5432`). Kredensial default:
+
+- `DB_USER` default **`althea`**, `DB_PASSWORD` default **`password`** —
+  ubah lewat `.env` (`DB_PASSWORD=...`) lalu restart Althea.
+- Role dibuat otomatis di server (best-effort, idempotent: punya `CREATEDB`);
+  bila gagal, log event + notifikasi Telegram menyertakan perintah SQL manualnya.
+- Kredensial yang sama **disuntik ke prompt tiap fase pipeline** — setiap app
+  cukup `CREATE DATABASE` sendiri, dilarang membuat role/user atau mengganti
+  password. Lihat `src/db.ts`.
+
 ## Aturan izin (eskalasi otomatis)
 
 1. Pertanyaan/izin Muse (`IZIN: ...`) **muncul di dashboard web dulu**.
@@ -31,6 +45,10 @@ Dashboard memakai **Svelte 5 + Vite** (build statis ±100 KB, tanpa framework ru
    tapi otomatis bangun untuk: pesan Telegram, approval, tugas baru.
 3. **Prompt tersimpan, siap jalan ulang** — `src/state.ts`. Tiap tugas menyimpan
    prompt lengkapnya di `data/state.json`, jadi boot ulang tinggal lanjut.
+   Progres graph + **handoff** (`src/handoff.ts`: ringkasan pekerjaan yang sudah
+   selesai + diff di disk) ikut disuntik saat resume — limit → ganti
+   model/provider → run ulang berarti **lanjut dari status terakhir**, bukan
+   baca PRD/kerja dari nol.
 4. **Deteksi limit token (tanpa cooldown)** — pola `usage limit / rate limit / quota /
    429 / overloaded / try again in …` pada **error asli CLI/API** (bukan jawaban AI)
    → tugas langsung `failed` + notif Telegram. Tanpa tunggu otomatis: ganti ke

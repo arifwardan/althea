@@ -98,6 +98,13 @@ export const config = {
   // Remote GitHub otomatis saat create project: git@github.com:USER/name.git.
   // Kosong = lewati (remote bawaan hasil clone tak pernah ditimpa).
   githubUsername: (process.env.GITHUB_USERNAME || "").trim(),
+  // PostgreSQL BERSAMA untuk semua app buatan: pakai server lokal yang SUDAH
+  // terinstall (app tak pernah diminta menginstall). User default "althea",
+  // password default "password" — ubah lewat DB_PASSWORD di .env (restart).
+  dbHost: process.env.DB_HOST || "127.0.0.1",
+  dbPort: num("DB_PORT", 5432) || 5432,
+  dbUser: (process.env.DB_USER || "althea").trim(),
+  dbPassword: (process.env.DB_PASSWORD || "").trim(),
   // Runner skrip JS project (verifier + default preview): "npm" atau "bun".
   // Nilai asing = npm. Butuh bun terinstal bila diisi "bun".
   jsRunner: ((process.env.JS_RUNNER || "").trim().toLowerCase() === "bun" ? "bun" : "npm") as "npm" | "bun",

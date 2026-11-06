@@ -10,6 +10,7 @@ import type { AltheaState, Project, StackTask } from "./state.js";
 import { logEvent } from "./state.js";
 import { pushTask, cancelTask } from "./workflow.js";
 import { projectDir, normalizeStackSpec, normalizeCategories, CATEGORY_DIMS } from "./projects.js";
+import { dbInstructions } from "./db.js";
 
 /** Ronde ke-N dari id fase "fitur-N"; 0 bila bukan fase fitur. */
 export function fiturRound(phaseId: string): number {
@@ -83,7 +84,10 @@ export function projectScopeRule(appDir?: string): string {
 export function buildPhasePrompt(phaseId: string, goal: string, opts: PhasePromptOpts = {}, appDir?: string): { title: string; prompt: string } {
   const g = goal.trim() || "(no goal — read PRD.md if present)";
   const spec = normalizeStackSpec(opts.stack);
-  const stackLine = `Required stack — BE: ${spec.be}, FE: ${spec.fe}, DB: ${spec.db}, CSS: ${spec.css} (Althea default: Laravel + Svelte + PostgreSQL + Tailwind, preview via lerd).`;
+  // Jangan pernah menyuruh AI install PostgreSQL: server lokal yang sudah
+  // terinstall + kredensial bersama Althea (lihat db.ts) ikut ke tiap fase.
+  const dbLine = dbInstructions(spec.db);
+  const stackLine = `Required stack — BE: ${spec.be}, FE: ${spec.fe}, DB: ${spec.db}, CSS: ${spec.css} (Althea default: Laravel + Svelte + PostgreSQL + Tailwind, preview via lerd).${dbLine ? ` ${dbLine}` : ""}`;
   const cats = normalizeCategories(opts.categories);
   const catBits = CATEGORY_DIMS.filter((d) => cats[d].length).map((d) => `${d}: ${cats[d].join(", ")}`);
   const catLine = catBits.length
