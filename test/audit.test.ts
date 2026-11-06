@@ -2,7 +2,7 @@
 // Jalankan: npm test (tsx + node:test, tanpa dependensi baru).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { summarizeToolCalls } from "../web/src/audit.js";
+import { summarizeToolCalls } from "../web/src/audit.ts";
 
 describe("summarizeToolCalls", () => {
   it("mengelompokkan hasil tool: hitung, ok, fail, urut calls", () => {

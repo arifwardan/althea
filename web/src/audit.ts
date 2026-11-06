@@ -1,13 +1,30 @@
 // Ringkasan audit tool calls untuk panel review (murni, tanpa dependensi).
 // Dipakai web (App.svelte); data mentah berasal dari TaskActivity (tool/ok).
 
+export interface ToolActivity {
+  kind?: string;
+  tool?: string;
+  ok?: boolean;
+  text?: string;
+}
+
+export interface ToolAudit {
+  tool: string;
+  calls: number;
+  ok: number;
+  fail: number;
+  pending: number;
+  last: string;
+  lastOk: boolean | null;
+}
+
 /**
  * Kelompokkan aktivitas tool per nama tool.
  * calls = hasil tercatat + yang masih gantung (proposed tanpa result,
  * mis. run dibatalkan/timeout di tengah tool call).
  */
-export function summarizeToolCalls(acts) {
-  const map = new Map();
+export function summarizeToolCalls(acts: ToolActivity[] | null | undefined): ToolAudit[] {
+  const map = new Map<string, ToolAudit>();
   for (const a of acts || []) {
     if (!a || a.kind !== "tool" || !a.tool) continue;
     let e = map.get(a.tool);

@@ -1,13 +1,13 @@
 // Pewarna sintaks ringan tanpa dependensi untuk panel review.
 // Dipakai web (App.svelte) dan bisa diuji langsung via node:test.
 
-const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const ESC: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
-export function escHtml(s) {
+export function escHtml(s: unknown): string {
   return String(s).replace(/[&<>"']/g, (c) => ESC[c]);
 }
 
-const GENERIC_KW = [
+const GENERIC_KW: string[] = [
   "const", "let", "var", "function", "return", "if", "else", "for", "while", "do",
   "switch", "case", "default", "break", "continue", "new", "delete", "typeof",
   "instanceof", "in", "of", "try", "catch", "finally", "throw", "async", "await",
@@ -19,7 +19,7 @@ const GENERIC_KW = [
   "null", "undefined", "None", "True", "False",
 ];
 
-const EXTRA_KW = {
+const EXTRA_KW: Record<string, string[]> = {
   py: ["def", "elif", "lambda", "with", "pass", "raise", "except", "global", "nonlocal", "assert", "del"],
   sh: ["then", "elif", "fi", "do", "done", "case", "esac", "function", "exit", "local", "export", "echo", "then"],
   sql: ["select", "from", "where", "join", "left", "right", "inner", "outer", "on", "group", "by", "order",
@@ -27,7 +27,7 @@ const EXTRA_KW = {
     "alter", "drop", "and", "or", "not", "primary", "key", "distinct", "as", "like", "between", "exists"],
 };
 
-const EXT_LANG = {
+const EXT_LANG: Record<string, string> = {
   js: "js", jsx: "js", mjs: "js", cjs: "js",
   ts: "ts", tsx: "ts", mts: "ts", cts: "ts",
   svelte: "svelte", vue: "svelte", html: "svelte", htm: "svelte", xml: "svelte",
@@ -42,17 +42,17 @@ const EXT_LANG = {
   c: "c", h: "c", cpp: "c", hpp: "c", cs: "c",
 };
 
-const BASE_FILES = { dockerfile: "hash", makefile: "sh", justfile: "sh" };
+const BASE_FILES: Record<string, string> = { dockerfile: "hash", makefile: "sh", justfile: "sh" };
 
-export function langOf(path) {
-  const base = String(path || "").split("/").pop().toLowerCase();
+export function langOf(path: string): string {
+  const base = String(path || "").split("/").pop()!.toLowerCase();
   if (BASE_FILES[base]) return BASE_FILES[base];
   const dot = base.lastIndexOf(".");
   const ext = dot >= 0 ? base.slice(dot + 1) : "";
   return EXT_LANG[ext] || "c";
 }
 
-function keywordsFor(lang) {
+function keywordsFor(lang: string): Set<string> {
   const set = new Set(GENERIC_KW);
   for (const w of EXTRA_KW[lang] || []) set.add(w);
   return set;
@@ -64,7 +64,7 @@ const STR_TICK = "`(?:\\\\.|[^`\\\\])*`";
 const STR_TRIPLE = '"""[\\s\\S]*?"""|\'\'\'[\\s\\S]*?\'\'\'';
 const NUM = "\\b\\d[\\w.]*\\b";
 
-function patternFor(lang) {
+function patternFor(lang: string): RegExp {
   if (lang === "prose") return new RegExp(`(${STR_TICK}|${NUM}|[A-Za-z_$][\\w$]*)`, "g");
   if (lang === "svelte") {
     return new RegExp(
@@ -83,16 +83,16 @@ function patternFor(lang) {
   return new RegExp(`(${comment}|${str}|${NUM}|${ident})`, "g");
 }
 
-function isSpace(ch) {
+function isSpace(ch: string | undefined): boolean {
   return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f";
 }
 
 // Bungkus token yang mengandung \n agar tiap baris punya span seimbang.
-function span(cls, text) {
+function span(cls: string, text: string): string {
   return `<span class="${cls}">` + escHtml(text).replace(/\n/g, `</span>\n<span class="${cls}">`) + "</span>";
 }
 
-export function highlightCode(src, path) {
+export function highlightCode(src: string | null | undefined, path: string): string {
   const text = String(src == null ? "" : src);
   // Berkas raksasa: tetap aman tapi tanpa pewarnaan token.
   if (text.length > 200_000) {
@@ -103,7 +103,7 @@ export function highlightCode(src, path) {
   const re = patternFor(lang);
   let out = "";
   let last = 0;
-  let m;
+  let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const tok = m[0];
     const idx = m.index;

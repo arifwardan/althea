@@ -12,7 +12,7 @@ import {
   addFromZip, addFromRepo, removeProject, listProjects,
   listFiles, readProjectFile, projectDiff, snapshotFiles, startFileWatch,
   readStandards, prdSlice, contextTree, addBlank, addPrd,
-  normalizeStackSpec, isDefaultStack, isPreviewStack, stackSummary,
+  normalizeStackSpec, isDefaultStack, isPreviewStack, stackSummary, STACK_OPTIONS,
   normalizeCategories, inferCategories, autoCategories, categoriesEmpty,
 } from "../src/projects.js";
 import { parseMultipart } from "../src/server.js";
@@ -91,13 +91,20 @@ describe("zip aman", () => {
 
 describe("tech stack per lapisan", () => {
   it("normalizeStackSpec: kosong → default penuh", () => {
-    assert.deepEqual(normalizeStackSpec(undefined), { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" });
-    assert.deepEqual(normalizeStackSpec(""), { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind" });
+    assert.deepEqual(normalizeStackSpec(undefined), { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind", extras: {} });
+    assert.deepEqual(normalizeStackSpec(""), { fe: "svelte", be: "laravel", db: "postgresql", css: "tailwind", extras: {} });
   });
   it("normalizeStackSpec: parsial + string lama", () => {
-    assert.deepEqual(normalizeStackSpec({ be: "node" }), { fe: "svelte", be: "node", db: "postgresql", css: "tailwind" });
-    assert.deepEqual(normalizeStackSpec("node"), { fe: "svelte", be: "node", db: "postgresql", css: "tailwind" });
-    assert.deepEqual(normalizeStackSpec({ be: "rails", db: "mysql" }), { fe: "svelte", be: "laravel", db: "mysql", css: "tailwind" });
+    assert.deepEqual(normalizeStackSpec({ be: "node" }), { fe: "svelte", be: "node", db: "postgresql", css: "tailwind", extras: {} });
+    assert.deepEqual(normalizeStackSpec("node"), { fe: "svelte", be: "node", db: "postgresql", css: "tailwind", extras: {} });
+    assert.deepEqual(normalizeStackSpec({ be: "rails", db: "mysql" }), { fe: "svelte", be: "laravel", db: "mysql", css: "tailwind", extras: {} });
+  });
+  it("normalizeStackSpec: ElysiaJS sebagai backend", () => {
+    assert.deepEqual(normalizeStackSpec({ be: "elysia" }), { fe: "svelte", be: "elysia", db: "postgresql", css: "tailwind", extras: {} });
+    assert.deepEqual(normalizeStackSpec("elysia"), { fe: "svelte", be: "elysia", db: "postgresql", css: "tailwind", extras: {} });
+    assert.equal(isPreviewStack({ be: "elysia" }), false); // preview via dev server, bukan lerd
+    assert.equal(stackSummary({ be: "elysia" }), "ElysiaJS + Svelte + PostgreSQL + Tailwind");
+    assert.ok(STACK_OPTIONS.be.some((o) => o.id === "elysia"));
   });
   it("isDefaultStack / isPreviewStack / stackSummary", () => {
     assert.equal(isDefaultStack(undefined), true);
@@ -154,7 +161,7 @@ describe("kategori berlapis", () => {
       categories: { interaksi: ["otomasi"] },
     });
     assert.equal(r.ok, true);
-    assert.deepEqual(r.project?.stackSpec, { fe: "svelte", be: "python", db: "sqlite", css: "tailwind" });
+    assert.deepEqual(r.project?.stackSpec, { fe: "svelte", be: "python", db: "sqlite", css: "tailwind", extras: {} });
     assert.deepEqual(r.project?.categories?.interaksi, ["otomasi"]);
     assert.equal(isPreviewStack(r.project?.stackSpec), false);
   });

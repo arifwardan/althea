@@ -79,6 +79,17 @@ describe("transisi fase", () => {
     const r = buildPhasePrompt("rilis", "pos kasir");
     assert.match(r.prompt, /ready-to-sell\/deploy/);
   });
+  it("prompt create-project dikurung di folder app; larang sentuh file Althea", () => {
+    for (const id of ["prd", "mvp", "fitur-2", "rilis"]) {
+      const p = buildPhasePrompt(id, "pos kasir", {}, "/tmp/aplikasiku");
+      assert.match(p.prompt, /\/tmp\/aplikasiku/, id);
+      assert.match(p.prompt, /ONLY inside it/, id);
+      assert.match(p.prompt, /NEVER touch anything outside it/, id);
+      assert.match(p.prompt, /Althea's own files/, id);
+    }
+    const noDir = buildPhasePrompt("mvp", "pos kasir");
+    assert.match(noDir.prompt, /NEVER touch anything outside it/);
+  });
   it("prompt fase membawa stack per lapisan + kategori berlapis", () => {
     const prd = buildPhasePrompt("prd", "pos kasir", {
       stack: { be: "laravel", fe: "svelte", db: "postgresql", css: "tailwind" },

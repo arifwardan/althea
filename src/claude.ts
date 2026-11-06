@@ -1,9 +1,8 @@
-// Pembungkus Muse CLI: eksekusi prompt, DETEKSI LIMIT TOKEN,
-// dan jadwalkan RESUME OTOMATIS tiap reset ±5 jam tanpa prompt ulang.
-import { spawn } from "node:child_process";
-import { config, resetMs } from "./config.js";
-import type { AltheaState } from "./state.js";
-import { logEvent } from "./state.js";
+// Pembungkus Muse CLI: eksekusi prompt + DETEKSI LIMIT TOKEN.
+// Tanpa cooldown: limit langsung menggagalkan tugas (admin ganti
+// model/provider lalu jalankan ulang) — tak ada tunggu otomatis.
+import { spawn, execFileSync } from "node:child_process";
+import { config, detectBrainAgent } from "./config.js";
 import { createExecStream, type StreamActivity } from "./execstream.js";
 import { startFileWatch } from "./projects.js";
 
@@ -53,29 +52,52 @@ export function normalizeModel(v: unknown): string {
   return String(v ?? "").trim().slice(0, 120);
 }
 
-export interface BrainOverride { model: string; effort: string; }
+/** Agen coding valid atau "" = ikut env/tebakan biner. Nilai asing → "". */
+export function normalizeAgent(v: unknown): string {
+  const t = String(v ?? "").trim().toLowerCase();
+  return t === "muse" || t === "opencode" ? t : "";
+}
+
+/** Perintah biner otak, di-trim, maks 200 char. "" = ikut env. */
+export function normalizeBin(v: unknown): string {
+  return String(v ?? "").trim().slice(0, 200);
+}
+
+export interface BrainOverride {
+  model: string; effort: string; bin?: string; agent?: string; subcommand?: string;
+}
 export type BrainSource = "dashboard" | "env" | "cli-default";
 
 export interface EffectiveBrain {
   bin: string;
-  subcommand: string; // "exec" | "" (gaya lama -p)
+  agent: string; // "muse" (Muse Code) | "opencode" (OpenCode)
+  subcommand: string; // "exec" | "run" | "" (gaya lama -p)
   model: string;
   effort: string;
+  binSource: BrainSource;
+  agentSource: BrainSource;
   modelSource: BrainSource;
   effortSource: BrainSource;
 }
 
-export interface BrainEnv { bin: string; subcommand: string; model: string; effort: string; }
+export interface BrainEnv { bin: string; agent: string; subcommand: string; model: string; effort: string; }
 
 // Override modul: diset dari state saat boot + tiap PUT /api/brain.
 let override: BrainOverride = { model: "", effort: "" };
 
-export function setBrainOverride(o: { model?: unknown; effort?: unknown }): void {
-  override = { model: normalizeModel(o.model), effort: normalizeEffort(o.effort) };
+export function setBrainOverride(o: { model?: unknown; effort?: unknown; bin?: unknown; agent?: unknown; subcommand?: unknown }): void {
+  override = {
+    model: normalizeModel(o.model),
+    effort: normalizeEffort(o.effort),
+    bin: normalizeBin(o.bin),
+    agent: normalizeAgent(o.agent),
+    subcommand: String(o.subcommand ?? "").trim().slice(0, 120),
+  };
 }
 
 const defaultEnv = (): BrainEnv => ({
   bin: config.brainBin,
+  agent: config.brainAgent,
   subcommand: config.brainSubcommand,
   model: normalizeModel(config.brainModel),
   effort: normalizeEffort(config.brainEffort),
@@ -85,11 +107,21 @@ const defaultEnv = (): BrainEnv => ({
 export function effectiveBrain(o: BrainOverride = override, env: BrainEnv = defaultEnv()): EffectiveBrain {
   const model = o.model || env.model;
   const effort = o.effort || env.effort;
+  // Pilihan agen dari dashboard (bin/agent) mengalahkan env; bin kustom tanpa
+  // agen eksplisit ditebak dari namanya; subcommand mengikuti agen terpilih
+  // (exec/run) kecuali env memaksa gaya lama -p dan dashboard tak campur tangan.
+  const bin = o.bin || env.bin;
+  const agent = o.agent || (o.bin ? detectBrainAgent(o.bin, "") : env.agent);
+  const dashTouched = !!(o.bin || o.agent);
+  const subcommand = o.subcommand || (dashTouched ? (agent === "opencode" ? "run" : "exec") : env.subcommand);
   return {
-    bin: env.bin,
-    subcommand: env.subcommand,
+    bin,
+    agent,
+    subcommand,
     model,
     effort,
+    binSource: o.bin ? "dashboard" : "env",
+    agentSource: dashTouched ? "dashboard" : "env",
     modelSource: o.model ? "dashboard" : env.model ? "env" : "cli-default",
     effortSource: o.effort ? "dashboard" : env.effort ? "env" : "cli-default",
   };
@@ -136,8 +168,23 @@ export function effectiveTimeoutSeconds(
   return { seconds: TIMEOUT_DEFAULT_SECONDS, source: "default" };
 }
 
-/** Susun argv spawn. Flags model/effort hanya untuk gaya exec (terverifikasi); gaya lama tetap -p. */
+/** Susun argv spawn per agen. */
 export function brainArgs(prompt: string, b: EffectiveBrain = effectiveBrain()): string[] {
+  // OpenCode: `opencode run [--model provider/model] --format json --auto --standalone <prompt>`.
+  // --format json → stream event JSONL (diterjemah ExecStream);
+  // --auto → auto-approve izin yang tak ditolak eksplisit (setara
+  // --disable-approval muse: althea punya jalur izin sendiri via web/Telegram,
+  // run headless tak bisa menjawab approval interaktif);
+  // --standalone → server privat per run (tidak bergantung pada — atau
+  // bertabrakan dengan — layanan latar opencode milik user).
+  if (b.agent === "opencode") {
+    const args = [b.subcommand || "run"];
+    if (b.model) args.push("--model", b.model);
+    args.push("--format", "json", "--auto", "--standalone");
+    args.push(prompt);
+    return args;
+  }
+  // Muse Code (gaya exec; subcommand kosong = gaya lama -p).
   if (!b.subcommand) return ["-p", prompt];
   const args = [b.subcommand];
   if (b.model) args.push("--model", b.model);
@@ -165,10 +212,105 @@ export function spawnErrorNote(bin: string, err: unknown): string {
   return `spawn error: ${String(err)}`;
 }
 
+// ——— Katalog model untuk select dashboard ———
+// muse: daftar terkurasi (resolve-nya terverifikasi via `muse model-profile show`).
+// opencode: provider terautentikasi (`opencode auth list --format json`) ×
+// model (`opencode models`) yang berawalan provider tersebut.
+export interface BrainProvider { id: string; name: string; }
+export interface BrainModelOption { value: string; label: string; provider: string; }
+export interface BrainCatalog { providers: BrainProvider[]; models: BrainModelOption[]; }
+
+/** Model muse yang terbukti resolve (model-profile show exit 0). */
+export const MUSE_MODELS = ["muse-spark", "muse-spark-1.3"];
+
+export type CatalogRun = (bin: string, args: string[], timeoutMs: number) => string | null;
+
+function defaultCatalogRun(bin: string, args: string[], timeoutMs: number): string | null {
+  try {
+    const out = execFileSync(bin, args, {
+      encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 4 * 1024 * 1024,
+    });
+    return typeof out === "string" ? out : String(out);
+  } catch {
+    return null;
+  }
+}
+
+/** Provider opencode yang punya koneksi tersimpan (dari JSON `auth list`). */
+export function parseOpenCodeProviders(raw: string | null): BrainProvider[] {
+  if (!raw) return [];
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (!Array.isArray(v)) return [];
+    const out: BrainProvider[] = [];
+    for (const p of v as Array<Record<string, unknown>>) {
+      if (typeof p?.id === "string" && p.id && typeof p?.name === "string" &&
+        Array.isArray(p?.connections) && (p.connections as unknown[]).length > 0) {
+        out.push({ id: p.id as string, name: p.name as string });
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Saring baris `opencode models` ke provider terdaftar ("provider/model", unik, terurut). */
+export function parseOpenCodeModels(raw: string | null, providerIds: Set<string> | string[]): BrainModelOption[] {
+  const set = providerIds instanceof Set ? providerIds : new Set(providerIds);
+  if (!raw) return [];
+  const out: BrainModelOption[] = [];
+  const seen = new Set<string>();
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t || !t.includes("/")) continue;
+    const i = t.indexOf("/");
+    const provider = t.slice(0, i);
+    const model = t.slice(i + 1);
+    if (!set.has(provider) || !model || seen.has(t)) continue;
+    seen.add(t);
+    out.push({ value: t, label: model, provider });
+  }
+  return out.sort((a, b) => a.provider.localeCompare(b.provider) || a.label.localeCompare(b.label));
+}
+
+export interface CatalogOpts { agent?: string; bin?: string; run?: CatalogRun; useCache?: boolean; }
+
+const CATALOG_TTL_MS = 5 * 60_000;
+let catalogCache: { key: string; at: number; cat: BrainCatalog } | null = null;
+
+/** Kosongkan cache katalog (untuk test). */
+export function clearBrainCatalogCache(): void {
+  catalogCache = null;
+}
+
+/** Katalog select dashboard sesuai agen aktif. Gagal baca CLI → katalog kosong (UI fallback). */
+export function listBrainModels(opts: CatalogOpts = {}): BrainCatalog {
+  const b = effectiveBrain();
+  const agent = opts.agent || b.agent;
+  const bin = opts.bin || b.bin;
+  if (agent !== "opencode") {
+    return {
+      providers: [],
+      models: MUSE_MODELS.map((m) => ({ value: m, label: m, provider: "muse" })),
+    };
+  }
+  if (opts.useCache !== false && catalogCache && catalogCache.key === bin &&
+    Date.now() - catalogCache.at < CATALOG_TTL_MS) {
+    return catalogCache.cat;
+  }
+  const run = opts.run || defaultCatalogRun;
+  const providers = parseOpenCodeProviders(run(bin, ["auth", "list", "--format", "json"], 15_000));
+  const models = parseOpenCodeModels(run(bin, ["models"], 20_000), providers.map((p) => p.id));
+  const cat = { providers, models };
+  if (opts.useCache !== false) catalogCache = { key: bin, at: Date.now(), cat };
+  return cat;
+}
+
 /** Ringkasan satu baris untuk log boot. */
 export function brainSummary(b: EffectiveBrain = effectiveBrain()): string {
   const cmd = b.subcommand ? `${b.bin} ${b.subcommand}` : `${b.bin} -p`;
-  return `${cmd} · model ${b.model || "default"} · effort ${b.effort || "default"}`;
+  return `[${b.agent}] ${cmd} · model ${b.model || "default"} · effort ${b.effort || "default"}`;
 }
 
 // Pola pesan limit/kuota dari CLI/API (dicocokkan case-insensitive).
@@ -188,6 +330,20 @@ const LIMIT_PATTERNS = [
 
 export function detectLimit(text: string): boolean {
   return LIMIT_PATTERNS.some((re) => re.test(text));
+}
+
+/**
+ * true = run gagal karena LIMIT KUOTA provider.
+ * Sinyal sah = error ASLI dari CLI/API (baris non-JSON stdout/stderr,
+ * event error opencode, task.lifecycle.failed muse) — selalu diperiksa.
+ * Jawaban AI (transkrip) hanya diperiksa bila run gagal (exit ≠ 0):
+ * prosa normal yang menyebut "quota"/"limit" saat bekerja BUKAN limit.
+ * Limit langsung menggagalkan tugas (tanpa cooldown); admin tinggal ganti
+ * model/provider lain yang belum kena limit, lalu jalankan ulang.
+ */
+export function limitHit(exitCode: number | null, errorText: string, transcript: string): boolean {
+  if (detectLimit(errorText)) return true;
+  return exitCode !== 0 && detectLimit(transcript);
 }
 
 /** Coba baca "try again in N ..." → ms. Dukung detik/menit/jam. */
@@ -217,6 +373,10 @@ export function runClaude(
     const timeoutSecs = effectiveTimeoutSeconds().seconds;
     const child = spawn(brain.bin, brainArgs(prompt, brain), {
       shell: false,
+      // stdin ditutup (EOF langsung): opencode membaca stdin bila
+      // pesannya kosong/tidak ada — dengan pipe terbuka run gantung
+      // selamanya. stdout/stderr tetap pipa untuk stream JSONL.
+      stdio: ["ignore", "pipe", "pipe"],
       ...(cwd ? { cwd } : {}),
     });
     const ref = { child, killed: false };
@@ -286,16 +446,17 @@ export function runClaude(
         return;
       }
       const transcript = stream.transcript().slice(0, 8000);
+      const errorText = stream.errors();
       if (timedOut) {
         finish({ ok: false, output: `TIMEOUT ${timeoutSecs}s — process killed. Partial output:\n${transcript}`, hitLimit: false, retryAfterMs: null, cancelled: false, timedOut: true });
         return;
       }
-      const hitLimit = detectLimit(transcript);
+      const hitLimit = limitHit(code, errorText, transcript);
       finish({
         ok: code === 0 && !hitLimit,
         output: transcript || `(exit ${code})`,
         hitLimit,
-        retryAfterMs: hitLimit ? parseRetryAfter(transcript) : null,
+        retryAfterMs: hitLimit ? parseRetryAfter(`${errorText}\n${transcript}`) : null,
         cancelled: false,
         timedOut: false,
       });
@@ -303,23 +464,4 @@ export function runClaude(
   });
 }
 
-/** Masuk mode cooldown limit: notif + catat kapan resume otomatis. */
-export function enterLimitCooldown(s: AltheaState, retryAfterMs: number | null): string {
-  const wait = retryAfterMs ?? resetMs(); // default: reset langganan ±5 jam
-  const until = new Date(Date.now() + wait).toISOString();
-  s.limitCooldownUntil = until;
-  logEvent(s, `token limit → cooldown until ${until}`);
-  return until;
-}
 
-/** true = masih cooldown; false = sudah tiba waktunya resume (sekaligus reset flag). */
-export function limitDue(s: AltheaState, now = new Date()): boolean {
-  if (!s.limitCooldownUntil) return true;
-  if (new Date(s.limitCooldownUntil).getTime() <= now.getTime()) {
-    s.limitCooldownUntil = null;
-    s.lastReset = now.toISOString();
-    logEvent(s, "reset reached → auto-resume without re-prompting");
-    return true;
-  }
-  return false;
-}

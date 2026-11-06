@@ -6,17 +6,17 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 import type { AltheaState } from "./state.js";
 import { config } from "./config.js";
-import { pushTask, pushFollowup, resolveApproval, cancelTask } from "./workflow.js";
+import { pushTask, pushFollowup, resolveApproval, cancelTask, correctTask, deleteTask, requeueTask, markReviewed, listApprovals } from "./workflow.js";
 import {
-  killRunning, setBrainOverride, effectiveBrain,
-  normalizeEffort, normalizeModel, BRAIN_EFFORTS,
+  killRunning, setBrainOverride, effectiveBrain, listBrainModels,
+  normalizeEffort, normalizeModel, normalizeBin, normalizeAgent, BRAIN_EFFORTS,
   setTimeoutOverride, effectiveTimeoutSeconds, parseTimeoutSeconds,
   TIMEOUT_MIN_SECONDS, TIMEOUT_MAX_SECONDS, TIMEOUT_DEFAULT_SECONDS,
 } from "./claude.js";
 import { logEvent } from "./state.js";
 import {
   addFromRepo, addFromZip, addBlank, addPrd, listProjects, removeProject, projectDir,
-  listFiles, readProjectFile, projectDiff, detectStack, isPreviewStack,
+  listFiles, readProjectFile, projectDiff, detectStack,
   autoCategories, normalizeStackSpec, prdSlice,
   STACK_OPTIONS, CATEGORY_TAXONOMY, CATEGORY_DIM_LABEL,
 } from "./projects.js";
@@ -57,7 +57,7 @@ function parseCategoriesInput(v: unknown, alt?: unknown): unknown {
 }
 import {
   createPreviewManager, readPreviewFile, resolveCommand as resolvePreviewCommand,
-  isStaticDir, previewNote, previewKind, isStandardStack, siteUrl, linkSite, lerdAvailable,
+  isStaticDir, previewNote, previewKind, isStandardStack, isMonorepo, siteUrl, linkSite, lerdAvailable,
 } from "./preview.js";
 import {
   startPipelineAuto, pausePipeline, resumePipeline, cancelPipeline,
@@ -218,11 +218,11 @@ function proxyToPort(req: IncomingMessage, res: ServerResponse, port: number, ta
 
 export function startServer(s: AltheaState, save: () => void, port: number, host: string): Server {
   const store = createStore();
-  const preview = createPreviewManager({ basePort: config.previewBasePort });
+  const preview = createPreviewManager({ basePort: config.previewBasePort, testPort: config.previewTestPort });
   const haltPreview = () => preview.stopAll();
   process.on("SIGINT", haltPreview);
   process.on("SIGTERM", haltPreview);
-  setBrainOverride({ model: s.brain?.model, effort: s.brain?.effort }); // override dashboard dari state
+  setBrainOverride({ model: s.brain?.model, effort: s.brain?.effort, bin: s.brain?.bin, agent: s.brain?.agent, subcommand: s.brain?.subcommand }); // override dashboard dari state
   setTimeoutOverride(s.limits?.timeoutSeconds); // override timeout dashboard dari state
   const authRequired = config.adminPassword.length > 0;
   const sessionTtlMs = config.sessionDays * 86_400_000;
@@ -307,6 +307,17 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
       if (!authorized(req)) return json(res, { error: "login required" }, 401);
 
       if (req.method === "GET" && path === "/api/state") return json(res, s);
+      if (req.method === "GET" && path === "/api/approvals") {
+        const url = new URL(req.url || "/", "http://x");
+        const list = listApprovals(s, {
+          status: url.searchParams.get("status") || undefined,
+          source: url.searchParams.get("source") || url.searchParams.get("via") || undefined,
+        });
+        return json(res, list);
+      }
+      if (req.method === "GET" && path === "/api/approval-history") {
+        return json(res, Array.isArray(s.approvalHistory) ? s.approvalHistory : []);
+      }
       if (req.method === "GET" && path === "/api/report") {
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
         res.end(buildReport(s));
@@ -316,10 +327,10 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         return json(res, await getMetrics());
       }
       if (req.method === "GET" && path === "/api/brain") {
-        return json(res, { ...effectiveBrain(), efforts: BRAIN_EFFORTS });
+        return json(res, { ...effectiveBrain(), efforts: BRAIN_EFFORTS, catalog: listBrainModels() });
       }
       if (req.method === "PUT" && path === "/api/brain") {
-        const { model, effort } = JSON.parse((await body(req)) || "{}");
+        const { model, effort, bin, agent } = JSON.parse((await body(req)) || "{}");
         // Absen = pertahankan; string kosong = kembali ke default env/CLI.
         if (model !== undefined && typeof model !== "string") {
           return json(res, { error: "model must be a string" }, 400);
@@ -331,12 +342,25 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
             normalizeEffort(effort) === "") {
           return json(res, { error: `unknown effort (pick: ${BRAIN_EFFORTS.join("|")})` }, 400);
         }
+        if (bin !== undefined && typeof bin !== "string") {
+          return json(res, { error: "bin must be a string" }, 400);
+        }
+        if (agent !== undefined && typeof agent !== "string") {
+          return json(res, { error: "agent must be a string" }, 400);
+        }
+        if (agent !== undefined && String(agent).trim() !== "" &&
+            normalizeAgent(agent) === "") {
+          return json(res, { error: "unknown agent (pick: muse|opencode)" }, 400);
+        }
         if (model !== undefined) s.brain.model = normalizeModel(model);
         if (effort !== undefined) s.brain.effort = normalizeEffort(effort);
-        setBrainOverride({ model: s.brain.model, effort: s.brain.effort });
-        logEvent(s, `brain ← dashboard: model=${s.brain.model || "default"} effort=${s.brain.effort || "default"}`);
+        if (bin !== undefined) s.brain.bin = normalizeBin(bin);
+        if (agent !== undefined) s.brain.agent = normalizeAgent(agent);
+        setBrainOverride({ model: s.brain.model, effort: s.brain.effort, bin: s.brain.bin, agent: s.brain.agent });
+        const b = effectiveBrain();
+        logEvent(s, `brain ← dashboard: ${b.agent} ${b.bin}${b.subcommand ? " " + b.subcommand : ""} model=${b.model || "default"} effort=${b.effort || "default"}`);
         save();
-        return json(res, { ok: true, brain: effectiveBrain(), applies: "next-spawn" });
+        return json(res, { ok: true, brain: b, applies: "next-spawn" });
       }
       if (req.method === "GET" && path === "/api/limits") {
         const t = effectiveTimeoutSeconds();
@@ -466,7 +490,7 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         if (!/\.zip$/i.test(file.fileName)) return json(res, { error: "only .zip files" }, 400);
         const stackRaw = parseStackInput(up.fields.stack, up.fields.techStack);
         const spec = normalizeStackSpec(stackRaw);
-        const r = addFromZip(s, name, file.fileName, file.data, {
+        const r = await addFromZip(s, name, file.fileName, file.data, {
           stack: spec,
           categories: autoCategories(parseCategoriesInput(up.fields.categories, up.fields.category), goal, spec),
         });
@@ -520,15 +544,6 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         const dir = projectDir(name);
         if (!dir || !existsSync(dir)) return json(res, { error: "unknown project" }, 404);
         const p = s.projects.find((x) => x.name === name);
-        if (p && !isPreviewStack(p.stackSpec)) {
-          return json(res, {
-            state: "stopped", mode: null, port: null, cmd: null, pid: null,
-            startedAt: null, reachable: null, error: null, url: null, logs: [],
-            kind: "none", previewAvailable: false, savedCmd: p.previewCmd || "",
-            isStatic: false,
-            cmdNote: "preview is only for the Laravel backend (served via lerd).",
-          });
-        }
         const stack = detectStack(dir);
         const info = await preview.status(name, dir, stack, p?.previewCmd || "");
         // Kind saat tak ada proses berjalan; proses yang sudah jalan tetap dikelola apa pun stacknya.
@@ -536,12 +551,16 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
         const herd = kind === "herd";
         return json(res, {
           ...info,
-          ...(herd ? { url: siteUrl(name) } : {}),
+          ...(herd ? { url: siteUrl(name), tabUrl: siteUrl(name) } : {}),
           kind,
           previewAvailable: kind !== "none",
           savedCmd: p?.previewCmd || "",
           isStatic: isStaticDir(dir),
-          cmdNote: kind === "none" ? previewNote(stack, dir) : null,
+          cmdNote: kind === "none"
+            ? previewNote(stack, dir)
+            : (kind !== "herd" && isMonorepo(dir)
+              ? "monorepo — «npm run dev» at the root starts every app at once, each on its own port (e.g. web :5173 → name.test, api :3000 → api.test)."
+              : null),
           ...(herd ? { lerdOk: await lerdAvailable() } : {}),
         });
       }
@@ -555,9 +574,6 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
           const stopped = preview.stop(name);
           save();
           return json(res, { ok: true, stopped });
-        }
-        if (p && !isPreviewStack(p.stackSpec)) {
-          return json(res, { error: "preview is only for the Laravel backend (served via lerd)" }, 400);
         }
         // Stack standar: hubungkan ke lerd (disajikan sebagai namaproject.test, tanpa spawn).
         if (action === "link") {
@@ -612,6 +628,47 @@ export function startServer(s: AltheaState, save: () => void, port: number, host
           pipelineOnCancel(s, id); // tugas fase → pipeline ikut jeda
           forceWake(s, `cancel ${id}`);
         }
+        save();
+        return json(res, { ok });
+      }
+      if (req.method === "DELETE" && path.startsWith("/api/tasks/")) {
+        const id = decodeURIComponent(path.slice("/api/tasks/".length));
+        if (!id || id.includes("/")) return json(res, { error: "bad task id" }, 400);
+        const t = s.stack.find((x) => x.id === id);
+        if (!t) return json(res, { ok: false, error: "no such task" }, 404);
+        if (t.status === "running") killRunning(); // hentikan proses bila yang berjalan
+        pipelineOnCancel(s, id); // sebelum dihapus: tugas fase → pipeline ikut jeda
+        const ok = deleteTask(s, id);
+        if (ok) forceWake(s, `delete ${id}`);
+        save();
+        return json(res, { ok });
+      }
+      if (req.method === "POST" && path.startsWith("/api/tasks/") && path.endsWith("/correct")) {
+        const id = decodeURIComponent(path.slice("/api/tasks/".length, -"/correct".length));
+        const { correction } = JSON.parse((await body(req)) || "{}");
+        if (!String(correction || "").trim()) return json(res, { error: "correction is required" }, 400);
+        const t = s.stack.find((x) => x.id === id);
+        if (!t) return json(res, { ok: false, error: "no such task" }, 404);
+        if (t.status === "running") killRunning(); // hentikan run agar arahan baru dipakai
+        const ok = correctTask(s, id, String(correction));
+        if (ok) forceWake(s, `correct ${id}`);
+        save();
+        return json(res, { ok });
+      }
+      if (req.method === "POST" && path.startsWith("/api/tasks/") && path.endsWith("/rerun")) {
+        const id = decodeURIComponent(path.slice("/api/tasks/".length, -"/rerun".length));
+        const t = s.stack.find((x) => x.id === id);
+        if (!t) return json(res, { ok: false, error: "no such task" }, 404);
+        const ok = requeueTask(s, id);
+        if (!ok) return json(res, { ok: false, error: "only done/failed tasks can be re-run" }, 400);
+        forceWake(s, `rerun ${id}`);
+        save();
+        return json(res, { ok });
+      }
+      if (req.method === "POST" && path.startsWith("/api/tasks/") && path.endsWith("/reviewed")) {
+        const id = decodeURIComponent(path.slice("/api/tasks/".length, -"/reviewed".length));
+        const ok = markReviewed(s, id);
+        if (!ok) return json(res, { ok: false, error: "not a pending-review task" }, 400);
         save();
         return json(res, { ok });
       }

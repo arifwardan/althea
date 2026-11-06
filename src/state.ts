@@ -1,5 +1,6 @@
-// State persisten (JSON). Kunci auto-lanjut tanpa prompt ulang:
-// setiap tugas menyimpan prompt-nya, jadi boot / reset 5 jam tinggal lanjut.
+// State persisten (JSON). Setiap tugas menyimpan prompt-nya,
+// jadi boot ulang tinggal lanjut tanpa prompt ulang. Tanpa cooldown kuota:
+// limit provider langsung menggagalkan tugas (lihat claude.ts).
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { emptyUsage, type Usage } from "./tokens.js";
@@ -8,20 +9,11 @@ export type TaskStatus =
   | "queued"
   | "running"
   | "waiting_approval"
-  | "waiting_quota"
   | "sleeping"
   | "done"
   | "failed";
 
-/** Satu episode limit kuota (FR-4.4): kapan kena, kapan lanjut, durasi jeda. */
-export interface QuotaEvent {
-  taskId: string;
-  title: string;
-  hitAt: string; // kapan limit terdeteksi
-  resumeAt: string | null; // kapan selesai menunggu (resume/batal), null = masih menunggu
-  waitMs: number | null; // durasi jeda, diisi saat resumeAt diset
-  until: string; // estimasi reset saat limit terdeteksi (FR-4.1)
-}
+
 
 export interface GraphProgress {
   plan?: string;
@@ -41,6 +33,7 @@ export interface StackTask {
   usage?: Usage; // akumulasi karakter + estimasi token tugas ini
   status: TaskStatus;
   attempts: number;
+  reviewedAt: string | null; // kapan admin me-review selesai (null = menunggu review)
   note?: string;
   createdAt: string;
   updatedAt: string;
@@ -87,9 +80,34 @@ export interface Approval {
   escalatedAt: string | null; // kapan dilempar ke telegram
 }
 
+// Sumber keputusan izin yang sudah selesai (untuk daftar approval).
+export type ApprovalVia = "telegram" | "admin_web" | "AI";
+export type ApprovalStatus = "approved" | "rejected";
+export interface ApprovalRecord {
+  id: string;
+  title: string;
+  status: ApprovalStatus;
+  approver: string;
+  approved_via: ApprovalVia;
+  timestamp: string;
+  // alias kompatibilitas (camelCase)
+  approvedVia?: ApprovalVia;
+  decidedAt?: string;
+  decidedBy?: string;
+}
+
+export type ApprovalItem = ApprovalRecord;
+export type ApprovalHistoryEntry = ApprovalRecord;
+export type ApprovalListItem = ApprovalRecord;
+export type ApprovalListEntry = ApprovalRecord;
+export type ApprovalSource = ApprovalVia;
+
 export interface BrainSetting {
   model: string; // "" = ikut default env/CLI
   effort: string; // "" = ikut default env/CLI
+  bin: string; // "" = ikut env (BRAIN_BIN)
+  agent: string; // "" = ikut env/tebakan, else "muse" | "opencode"
+  subcommand: string; // "" = default per agen (exec/run) atau env bila dashboard tak campur
 }
 
 export interface LimitsSetting {
@@ -110,15 +128,16 @@ export interface AltheaState {
   brain: BrainSetting; // override dashboard (PUT /api/brain), berlaku spawn berikutnya
   limits: LimitsSetting; // override dashboard (PUT /api/limits), berlaku spawn berikutnya
   stack: StackTask[]; // tumpukan dinamis: puncak = elemen terakhir (LIFO)
-  approvals: Approval[];
+  approvals: Approval[]; // izin yang masih menunggu keputusan
+  approvalHistory: ApprovalRecord[]; // izin yang sudah diputuskan
+  approvalList: ApprovalRecord[]; // alias
+  approvalsHistory: ApprovalRecord[]; // alias
+  approvalRecords: ApprovalRecord[]; // alias
   projects: Project[]; // registry project di workspace/
   logs: Record<string, string[]>; // taskId → baris output Muse (maks 5 tugas × 200 baris)
   activity: Record<string, TaskActivity[]>; // taskId → feed aktivitas (maks 5 tugas × 120)
   usage: Usage; // total pemakaian runtime ini
   sleepUntil: string | null; // ISO atau null
-  limitCooldownUntil: string | null; // ISO: kapan boleh coba Muse lagi setelah limit
-  lastReset: string | null;
-  quotaHistory: QuotaEvent[]; // riwayat limit→resume (FR-4.4, maks 50 terakhir)
   events: string[]; // log ringkas (maks 200)
   bootedAt: string;
 }
@@ -126,18 +145,19 @@ export interface AltheaState {
 export function defaultState(): AltheaState {
   return {
     version: 1,
-    brain: { model: "", effort: "" },
+    brain: { model: "", effort: "", bin: "", agent: "", subcommand: "" },
     limits: { timeoutSeconds: 0 },
     stack: [],
     approvals: [],
+    approvalHistory: [],
+    approvalList: [],
+    approvalsHistory: [],
+    approvalRecords: [],
     projects: [],
     logs: {},
     activity: {},
     usage: emptyUsage(),
     sleepUntil: null,
-    limitCooldownUntil: null,
-    lastReset: null,
-    quotaHistory: [],
     events: [],
     bootedAt: new Date().toISOString(),
   };
@@ -154,21 +174,53 @@ export function loadState(path: string): AltheaState {
     const s = { ...defaultState(), ...JSON.parse(raw) } as AltheaState;
     if (!Array.isArray(s.stack)) s.stack = [];
     if (!Array.isArray(s.approvals)) s.approvals = [];
+    if (!Array.isArray(s.approvalHistory)) s.approvalHistory = [];
+    if (!Array.isArray(s.approvalList)) s.approvalList = s.approvalHistory;
+    if (!Array.isArray(s.approvalsHistory)) s.approvalsHistory = s.approvalHistory;
+    if (!Array.isArray(s.approvalRecords)) s.approvalRecords = s.approvalHistory;
+    // normalisasi alias agar menunjuk data sama
+    s.approvalList = s.approvalHistory;
+    s.approvalsHistory = s.approvalHistory;
+    s.approvalRecords = s.approvalHistory;
     if (!Array.isArray(s.projects)) s.projects = [];
     if (!s.logs || typeof s.logs !== "object") s.logs = {};
     if (!s.activity || typeof s.activity !== "object") s.activity = {};
     if (!s.usage || typeof s.usage !== "object") s.usage = emptyUsage();
-    if (!s.brain || typeof s.brain !== "object") s.brain = { model: "", effort: "" };
+    if (!s.brain || typeof s.brain !== "object") s.brain = { model: "", effort: "", bin: "", agent: "", subcommand: "" };
     if (typeof s.brain.model !== "string") s.brain.model = "";
     if (typeof s.brain.effort !== "string") s.brain.effort = "";
+    // Migrasi: state lama belum punya pilihan agen dashboard.
+    if (typeof s.brain.bin !== "string") s.brain.bin = "";
+    if (s.brain.agent !== "muse" && s.brain.agent !== "opencode") s.brain.agent = "";
+    if (typeof s.brain.subcommand !== "string") s.brain.subcommand = "";
     // Migrasi: state lama belum punya override batas eksekusi.
     if (!s.limits || typeof s.limits !== "object") s.limits = { timeoutSeconds: 0 };
     if (!Number.isFinite(s.limits.timeoutSeconds) || (s.limits.timeoutSeconds as number) < 0) {
       s.limits.timeoutSeconds = 0;
     }
     if (!Array.isArray(s.events)) s.events = [];
-    // Migrasi: state lama belum punya riwayat kuota (FR-4.4).
-    if (!Array.isArray(s.quotaHistory)) s.quotaHistory = [];
+    // Migrasi: tugas lama belum punya field reviewedAt — yang sudah done
+    // dianggap sudah di-review (tanpa notif susulan). null yang sudah ada
+    // (menunggu review) wajib dipertahankan, bukan ditimpa.
+    for (const t of s.stack) {
+      const rec = t as unknown as Record<string, unknown>;
+      if (!("reviewedAt" in rec)) {
+        (t as StackTask).reviewedAt = t.status === "done" ? t.updatedAt : null;
+      } else if (typeof rec.reviewedAt !== "string" && rec.reviewedAt !== null) {
+        (t as StackTask).reviewedAt = null;
+      }
+    }
+    // Migrasi: cooldown kuota dihapus — tugas lama berstatus waiting_quota
+    // langsung antre lagi (tak ada penahanan), sisa field kuota dibuang.
+    for (const t of s.stack) {
+      if ((t as { status?: string }).status === "waiting_quota") {
+        t.status = "queued";
+        t.updatedAt = new Date().toISOString();
+      }
+    }
+    for (const k of ["limitCooldownUntil", "lastReset", "quotaHistory"] as const) {
+      delete (s as unknown as Record<string, unknown>)[k];
+    }
     // Migrasi: project lama belum punya MCP / previewCmd / stackSpec / categories.
     // (Struktural saja di sini agar tak ada import siklik ke projects.ts;
     // normalisasi kanonis ada di normalizeStackSpec/normalizeCategories.)
@@ -199,6 +251,22 @@ export function loadState(path: string): AltheaState {
       if (a.stage !== "web" && a.stage !== "telegram") a.stage = "telegram";
       if (a.escalatedAt === undefined) a.escalatedAt = a.createdAt;
     }
+    // Migrasi/normalisasi record approval yang sudah diputuskan.
+    s.approvalHistory = (s.approvalHistory || []).map((r: any) => {
+      const rec = { ...r };
+      if (!rec.approved_via && rec.approvedVia) rec.approved_via = rec.approvedVia;
+      if (!rec.approvedVia && rec.approved_via) rec.approvedVia = rec.approved_via;
+      if (!rec.timestamp && rec.decidedAt) rec.timestamp = rec.decidedAt;
+      if (!rec.decidedAt && rec.timestamp) rec.decidedAt = rec.timestamp;
+      if (!rec.approver && rec.decidedBy) rec.approver = rec.decidedBy;
+      if (!rec.decidedBy && rec.approver) rec.decidedBy = rec.approver;
+      if (rec.approved_via === "auto") rec.approved_via = "AI"; // alias lama
+      if (rec.approvedVia === "auto") rec.approvedVia = "AI";
+      return rec as ApprovalRecord;
+    });
+    s.approvalList = s.approvalHistory;
+    s.approvalsHistory = s.approvalHistory;
+    s.approvalRecords = s.approvalHistory;
     return s;
   } catch {
     return defaultState();

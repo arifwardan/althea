@@ -66,8 +66,21 @@ export function reviewBriefForPhase(phaseId: string | undefined): string | undef
 
 export interface PhasePromptOpts { stack?: unknown; categories?: unknown; }
 
+/**
+ * Batas ruang lingkup untuk prompt create-project (fase pipeline): agen
+ * HANYA boleh berkutat di dalam folder app (workspace/<nama>) — tak boleh
+ * menyentuh file/folder Althea sendiri. Prompt add-task manual (menu add task)
+ * sengaja TIDAK memakai ini: ia boleh berjalan di root aplikasi/Althea.
+ */
+export function projectScopeRule(appDir?: string): string {
+  const where = appDir
+    ? `your working directory is the app folder at ${appDir}`
+    : "work ONLY inside your working directory";
+  return `Scope: ${where}. Create, modify, and delete files ONLY inside it. NEVER touch anything outside it — especially Althea's own files and folders.`;
+}
+
 /** Title + task prompt for one pipeline phase. Everything is written in English. */
-export function buildPhasePrompt(phaseId: string, goal: string, opts: PhasePromptOpts = {}): { title: string; prompt: string } {
+export function buildPhasePrompt(phaseId: string, goal: string, opts: PhasePromptOpts = {}, appDir?: string): { title: string; prompt: string } {
   const g = goal.trim() || "(no goal — read PRD.md if present)";
   const spec = normalizeStackSpec(opts.stack);
   const stackLine = `Required stack — BE: ${spec.be}, FE: ${spec.fe}, DB: ${spec.db}, CSS: ${spec.css} (Althea default: Laravel + Svelte + PostgreSQL + Tailwind, preview via lerd).`;
@@ -77,11 +90,13 @@ export function buildPhasePrompt(phaseId: string, goal: string, opts: PhasePromp
     ? `App categories — ${catBits.join("; ")}.`
     : "App categories: not set — decide them from your analysis (function, business model, architecture, target users, interaction) and write them into the PRD.";
   const englishLine = "Write everything in English. If the user's goal or any input is not in English, translate it to English first and work from the translation.";
+  const scopeLine = projectScopeRule(appDir);
   if (phaseId === "prd") {
     return {
       title: `PRD: ${g.slice(0, 60)}`,
       prompt: [
         "You are a product analyst + software architect.",
+        scopeLine,
         `User goal: "${g}"`,
         englishLine,
         stackLine,
@@ -99,6 +114,7 @@ export function buildPhasePrompt(phaseId: string, goal: string, opts: PhasePromp
       title: `MVP: ${g.slice(0, 60)}`,
       prompt: [
         "You are an engineer. Read PRD.md in your working directory until you understand it, then",
+        scopeLine,
         "implement the ENTIRE MVP scope until it REALLY RUNS",
         "(buildable/runnable, not stubs). Do not build follow-up features yet.",
         englishLine,
@@ -114,6 +130,7 @@ export function buildPhasePrompt(phaseId: string, goal: string, opts: PhasePromp
         "You are a release engineer. Verify the app runs (build + smoke test via",
         "its run/test commands), fix what is broken, write README.md (how to",
         "install/run/deploy), and tidy the code.",
+        scopeLine,
         englishLine,
         'End with a "ready-to-sell/deploy" checklist: each item ✓/✗ + a one-line reason.',
       ].join("\n"),
@@ -124,6 +141,7 @@ export function buildPhasePrompt(phaseId: string, goal: string, opts: PhasePromp
     title: `Follow-up features (round ${round})`,
     prompt: [
       "You are an engineer. Read PRD.md in your working directory. Implement the",
+      scopeLine,
       "highest-priority features that do NOT exist yet (several allowed, must keep running).",
       englishLine,
       "End your output with EXACTLY ONE line:",
@@ -135,7 +153,7 @@ export function buildPhasePrompt(phaseId: string, goal: string, opts: PhasePromp
 
 function pushPhase(s: AltheaState, p: Project, phaseId: string): StackTask {
   const pipe = p.pipeline as NonNullable<Project["pipeline"]>;
-  const { title, prompt } = buildPhasePrompt(phaseId, pipe.goal, { stack: p.stackSpec, categories: p.categories });
+  const { title, prompt } = buildPhasePrompt(phaseId, pipe.goal, { stack: p.stackSpec, categories: p.categories }, projectDir(p.name) ?? undefined);
   const t = pushTask(s, `[${p.name}] ${title}`.slice(0, 120), prompt, `pipeline ${phaseId}`, p.name);
   t.phase = phaseId;
   pipe.phases = [...pipe.phases.filter((x) => x.id !== phaseId), { id: phaseId, title, taskId: t.id, done: false }];
@@ -249,7 +267,7 @@ export function resumePipeline(s: AltheaState, project: string): StackTask | nul
   pipe.note = undefined;
   pipe.updatedAt = new Date().toISOString();
   const active = s.stack.some((t) =>
-    t.project === project && t.phase && ["queued", "running", "waiting_approval", "waiting_quota"].includes(t.status));
+    t.project === project && t.phase && ["queued", "running", "waiting_approval"].includes(t.status));
   if (active) {
     logEvent(s, `pipeline ${project} resumed`);
     return null;

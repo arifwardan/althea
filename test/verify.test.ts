@@ -5,7 +5,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { pkgScripts, runVerifyGates, realRunCmd } from "../src/verify.js";
+import { pkgScripts, runVerifyGates, realRunCmd, changedFiles, isDocsOnlyDiff } from "../src/verify.js";
+import { config, normalizeJsRunner } from "../src/config.js";
 
 function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "althea-verify-"));
@@ -53,10 +54,11 @@ describe("runVerifyGates (runner palsu)", () => {
     try {
       writeFileSync(join(d, "package.json"), JSON.stringify({ scripts: { check: "a", build: "b" } }));
       const seen: string[] = [];
+      // Runner eksplisit agar tak ikut .env lokal (JS_RUNNER).
       const v = await runVerifyGates(d, ["check", "build"], 5000, async (s) => {
         seen.push(s);
         return s === "check" ? { code: 0, output: "ok" } : { code: 1, output: "A".repeat(5000) };
-      });
+      }, "npm");
       assert.equal(v.ok, false);
       assert.deepEqual(seen, ["check", "build"]);
       assert.match(v.summary, /npm run build/);
@@ -67,15 +69,70 @@ describe("runVerifyGates (runner palsu)", () => {
   });
 });
 
-describe("runVerifyGates (npm asli)", () => {
-  it("skrip node trivial lolos", async (t) => {
-    let npmOk = true;
+describe("isDocsOnlyDiff", () => {
+  const mdDiff = [
+    " PRD.md | 2 +-",
+    " 1 file changed, 1 insertion(+), 1 deletion(-)",
+    "",
+    "diff --git a/PRD.md b/PRD.md",
+    "+| Monorepo | Turborepo |",
+  ].join("\n");
+  const codeDiff = [
+    " apps/web/postcss.config.js | 3 ++-",
+    " PRD.md | 2 +-",
+    " 2 files changed, 3 insertions(+), 2 deletions(-)",
+    "",
+    "diff --git a/apps/web/postcss.config.js b/apps/web/postcss.config.js",
+  ].join("\n");
+  it("hanya dokumen → true; campur kode → false", () => {
+    assert.deepEqual(changedFiles(mdDiff), ["PRD.md"]);
+    assert.equal(isDocsOnlyDiff(mdDiff), true);
+    assert.equal(isDocsOnlyDiff(codeDiff), false);
+  });
+  it("kosong → true (tak ada yang digate); tak terparsing → false (tetap verifikasi)", () => {
+    assert.equal(isDocsOnlyDiff(""), true);
+    assert.equal(isDocsOnlyDiff("   \n  "), true);
+    assert.equal(isDocsOnlyDiff("(not a git repo — review from the file list)"), false);
+    assert.equal(isDocsOnlyDiff("(no project — review from text output)"), false);
+    assert.equal(isDocsOnlyDiff("some random output without filenames"), false);
+  });
+});
+
+describe("JS_RUNNER npm|bun", () => {
+  it("normalizeJsRunner: hanya 'bun' yang lolos, selain itu npm", () => {
+    assert.equal(normalizeJsRunner("bun"), "bun");
+    assert.equal(normalizeJsRunner(" Bun "), "bun");
+    assert.equal(normalizeJsRunner("npm"), "npm");
+    assert.equal(normalizeJsRunner(""), "npm");
+    assert.equal(normalizeJsRunner("pnpm"), "npm");
+    assert.equal(normalizeJsRunner(null), "npm");
+  });
+  it("ringkasan gagal menyebut runner yang dipakai", async () => {
+    const d = tmpDir();
     try {
-      execFileSync("npm", ["--version"], { stdio: "ignore" });
-    } catch {
-      npmOk = false;
+      writeFileSync(join(d, "package.json"), JSON.stringify({ scripts: { build: "b" } }));
+      const fail = async () => ({ code: 1, output: "boom" });
+      const vBun = await runVerifyGates(d, ["build"], 5000, fail, "bun");
+      assert.match(vBun.summary, /bun run build/);
+      const vNpm = await runVerifyGates(d, ["build"], 5000, fail, "pnpm");
+      assert.match(vNpm.summary, /npm run build/); // asing = fallback npm
+    } finally {
+      rmSync(d, { recursive: true, force: true });
     }
-    if (!npmOk) t.skip("npm tak tersedia");
+  });
+});
+
+describe("runVerifyGates (runner asli)", () => {
+  it("skrip node trivial lolos", async (t) => {
+    // Mengikuti runner terkonfigurasi (JS_RUNNER npm|bun), bukan npm mentah.
+    const runner = normalizeJsRunner(config.jsRunner);
+    let runnerOk = true;
+    try {
+      execFileSync(runner, ["--version"], { stdio: "ignore" });
+    } catch {
+      runnerOk = false;
+    }
+    if (!runnerOk) t.skip("JS runner tak tersedia");
     const d = tmpDir();
     try {
       writeFileSync(join(d, "package.json"), JSON.stringify({

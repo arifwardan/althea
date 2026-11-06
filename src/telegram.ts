@@ -4,7 +4,7 @@
 import { config } from "./config.js";
 import type { AltheaState } from "./state.js";
 import { logEvent } from "./state.js";
-import { pushTask, resolveApproval, cancelTask, stackSummary } from "./workflow.js";
+import { pushTask, resolveApproval, cancelTask, markReviewed, stackSummary } from "./workflow.js";
 import { matchDestructive } from "./escalation.js";
 import { pipelineOnFail, pipelineOnCancel } from "./pipeline.js";
 import { killRunning } from "./claude.js";
@@ -77,8 +77,7 @@ export async function handleCommand(s: AltheaState, chatId: number, text: string
     case "/status": {
       const lines = [
         isSleeping(s) ? `Status: sleeping until ${s.sleepUntil}` : "Status: active",
-        ...(isSleeping(s) ? ["Wakes for: Telegram, approvals, resets"] : []),
-        ...(s.limitCooldownUntil ? [`Limit cooldown until: ${s.limitCooldownUntil}`] : []),
+        ...(isSleeping(s) ? ["Wakes for: Telegram messages and approvals"] : []),
         `Pending approvals: ${s.approvals.length}`,
         `Tasks on stack: ${s.stack.length}`,
       ];
@@ -92,7 +91,7 @@ export async function handleCommand(s: AltheaState, chatId: number, text: string
       const mnt = Number(rest[0]) || 60;
       const until = goSleep(s, mnt);
       save();
-      return `Sleeping for ${mnt} min (until ${until}).\nStill wakes for Telegram, approvals, and resets.`;
+      return `Sleeping for ${mnt} min (until ${until}).\nStill wakes for Telegram messages and approvals.`;
     }
     case "/wake":
       forceWake(s, "/wake command");
@@ -180,11 +179,18 @@ export async function pollTelegram(s: AltheaState, save: () => void): Promise<vo
     const j = (await r.json()) as { result?: Update[] };
     for (const u of j.result ?? []) {
       offset = u.update_id + 1;
-      // Tombol inline approve/reject
+      // Tombol inline approve/reject/reviewed
       if (u.callback_query?.data) {
         const chatId = u.callback_query.message?.chat.id ?? 0;
         if (!isAdmin(chatId)) { await answerCallback(u.callback_query.id, "Not an admin."); continue; }
         const [aksi, id] = u.callback_query.data.split(":");
+        if (aksi === "seen") {
+          const ok = markReviewed(s, id);
+          save();
+          await answerCallback(u.callback_query.id, ok ? "Reviewed." : "Already reviewed / unknown ID.");
+          if (chatId) await tgSend(String(chatId), ok ? `Reviewed ${id}.` : "Unknown ID.");
+          continue;
+        }
         if (aksi === "ok" || aksi === "no") {
           const ok = resolveApproval(s, id, aksi === "ok", aksi === "ok" ? "approve button" : "reject button", "admin-telegram");
           if (ok && aksi === "ok") forceWake(s, `approval ${id}`);

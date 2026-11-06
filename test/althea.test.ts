@@ -1,11 +1,14 @@
-// Kontrak inti Althea: limit→resume, approval, stack LIFO, tidur.
+// Kontrak inti Althea: deteksi limit (tanpa cooldown), approval, stack LIFO, tidur.
 // Jalankan: npm test (tsx + node:test, tanpa dependensi baru).
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { defaultState, appendLog, appendActivity } from "../src/state.js";
-import { pushTask, peek, markDone, requestApproval, resolveApproval, cancelTask, noteTimeout, stackSummary } from "../src/workflow.js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { defaultState, loadState, appendLog, appendActivity } from "../src/state.js";
+import { pushTask, peek, markDone, requestApproval, resolveApproval, cancelTask, correctTask, shouldApplyRunResult, deleteTask, requeueTask, parseIzinRequest, boundToDir, markReviewed, noteTimeout, stackSummary } from "../src/workflow.js";
 import { killRunning } from "../src/claude.js";
-import { detectLimit, parseRetryAfter, enterLimitCooldown, limitDue } from "../src/claude.js";
+import { detectLimit, parseRetryAfter, limitHit } from "../src/claude.js";
 import { goSleep, forceWake, isSleeping } from "../src/sleeper.js";
 
 describe("deteksi limit token", () => {
@@ -24,29 +27,22 @@ describe("deteksi limit token", () => {
     assert.equal(detectLimit("done: 3 files changed, tests passed"), false);
     assert.equal(detectLimit("IZIN: boleh deploy ke staging?"), false);
   });
-  it("parseRetryAfter membaca 'try again in N unit'", () => {
+  it("limitHit: hanya error asli atau run gagal + pesan limit", () => {
+    // Error asli CLI/API → limit, walau exit 0 (CLI melaporkan error sendiri).
+    assert.equal(limitHit(0, "usage limit reached, try again in 5 minutes", ""), true);
+    assert.equal(limitHit(1, "quota exceeded for this period", ""), true);
+    // Run SUKSES (exit 0) tapi jawaban AI menyebut quota → BUKAN limit.
+    assert.equal(limitHit(0, "", "I updated the quota config; tests passed"), false);
+    // Run gagal + pesan limit di output → limit.
+    assert.equal(limitHit(1, "", "Error: 429 Too Many Requests"), true);
+    // Run gagal tanpa pesan limit → gagal biasa.
+    assert.equal(limitHit(1, "", "done: 3 files changed"), false);
+  });
+  it("parseRetryAfter membaca 'try again in N unit' (untuk pesan saran tunggu)", () => {
     assert.equal(parseRetryAfter("try again in 5 minutes"), 5 * 60_000);
     assert.equal(parseRetryAfter("Try again in 2 hours"), 2 * 3_600_000);
     assert.equal(parseRetryAfter("try again in 30 detik"), 30_000);
     assert.equal(parseRetryAfter("limit reached"), null);
-  });
-});
-
-describe("cooldown + resume otomatis", () => {
-  it("enterLimitCooldown memakai retryAfter bila ada, else +5 jam", () => {
-    const s = defaultState();
-    const until = enterLimitCooldown(s, 60_000);
-    assert.ok(s.limitCooldownUntil === until);
-    assert.ok(Date.now() < new Date(until).getTime());
-    assert.equal(limitDue(s), false); // masih cooldown → tick harus skip
-  });
-  it("limitDue true + reset flag saat waktunya tiba", () => {
-    const s = defaultState();
-    enterLimitCooldown(s, 1_000);
-    const nanti = new Date(Date.now() + 60_000);
-    assert.equal(limitDue(s, nanti), true);
-    assert.equal(s.limitCooldownUntil, null);
-    assert.ok(s.lastReset);
   });
 });
 
@@ -97,6 +93,179 @@ describe("cancelTask (kill-switch)", () => {
   });
   it("killRunning tanpa proses → false", () => {
     assert.equal(killRunning(), false);
+  });
+});
+
+describe("correctTask (koreksi mid-run)", () => {
+  it("running → prompt ditempel koreksi + graph dibuang + kembali queued", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "prompt awal");
+    t.status = "running";
+    t.graph = { plan: "rencana lama", iteration: 2 };
+    assert.equal(correctTask(s, t.id, "pakai Elysia"), true);
+    assert.equal(t.status, "queued");
+    assert.match(t.prompt, /prompt awal/);
+    assert.match(t.prompt, /Admin correction: pakai Elysia/);
+    assert.equal(t.graph, undefined);
+    assert.equal(peek(s)?.id, t.id); // langsung bisa dikerjakan lagi
+  });
+  it("queued ikut bisa dikoreksi; attempts tak berubah", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    t.attempts = 2;
+    assert.equal(correctTask(s, t.id, "  tambah tombol cetak  "), true);
+    assert.equal(t.status, "queued");
+    assert.equal(t.attempts, 2);
+    assert.match(t.prompt, /tambah tombol cetak/);
+  });
+  it("done/failed/tak dikenal/koreksi kosong → false, prompt utuh", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "prompt awal");
+    markDone(s, t.id);
+    assert.equal(correctTask(s, t.id, "ubah"), false);
+    assert.equal(correctTask(s, "t_takada", "ubah"), false);
+    const q = pushTask(s, "Y", "prompt awal");
+    assert.equal(correctTask(s, q.id, "   "), false);
+    assert.equal(q.prompt, "prompt awal");
+  });
+});
+
+describe("shouldApplyRunResult (hasil run basi dibuang)", () => {
+  it("running → terapkan; queued/failed (correct/cancel mid-run) → buang", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    t.status = "running";
+    assert.equal(shouldApplyRunResult(t), true);
+    t.status = "queued"; // correctTask saat run berjalan
+    assert.equal(shouldApplyRunResult(t), false);
+    t.status = "failed"; // cancelTask saat run berjalan
+    assert.equal(shouldApplyRunResult(t), false);
+  });
+});
+
+describe("deleteTask (hapus permanen)", () => {
+  it("tugas hilang dari stack + approval/log/aktivitas ikut bersih", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    requestApproval(s, t.id, "izin?");
+    appendLog(s, t.id, "baris log");
+    appendActivity(s, t.id, "tool", "bash");
+    assert.equal(deleteTask(s, t.id), true);
+    assert.equal(s.stack.length, 0);
+    assert.equal(s.approvals.length, 0);
+    assert.ok(!(t.id in s.logs));
+    assert.ok(!(t.id in s.activity));
+    assert.equal(peek(s), undefined);
+  });
+  it("tugas lain tak tersentuh; id tak dikenal → false", () => {
+    const s = defaultState();
+    const a = pushTask(s, "A", "p");
+    const b = pushTask(s, "B", "p");
+    assert.equal(deleteTask(s, a.id), true);
+    assert.equal(s.stack.length, 1);
+    assert.equal(s.stack[0].id, b.id);
+    assert.equal(deleteTask(s, "t_takada"), false);
+  });
+});
+
+describe("requeueTask (jalankan ulang tanpa form)", () => {
+  it("done/failed → queued, prompt dan graph utuh", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "prompt awal");
+    t.graph = { plan: "rencana", iteration: 1 };
+    markDone(s, t.id);
+    assert.equal(requeueTask(s, t.id), true);
+    assert.equal(t.status, "queued");
+    assert.equal(t.prompt, "prompt awal");
+    assert.deepEqual(t.graph, { plan: "rencana", iteration: 1 });
+    assert.equal(peek(s)?.id, t.id);
+  });
+  it("running/queued/waiting_approval/tak dikenal → false", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    assert.equal(requeueTask(s, t.id), false); // queued
+    t.status = "running";
+    assert.equal(requeueTask(s, t.id), false);
+    requestApproval(s, t.id, "izin?");
+    assert.equal(requeueTask(s, t.id), false);
+    assert.equal(requeueTask(s, "t_takada"), false);
+  });
+});
+
+describe("parseIzinRequest (approval prompt toleran)", () => {
+  it("menangkap varian penulisan AI", () => {
+    assert.equal(parseIzinRequest("IZIN: boleh deploy?"), "boleh deploy?");
+    assert.equal(parseIzinRequest("kerja selesai\n**IZIN:** hapus folder X?"), "hapus folder X?");
+    assert.equal(parseIzinRequest("**IZIN**: hapus folder X?"), "hapus folder X?");
+    assert.equal(parseIzinRequest("  IZIN : lanjut?"), "lanjut?");
+    assert.equal(parseIzinRequest("Izin: restart service?"), "restart service?");
+  });
+  it("prosa biasa / kosong → null", () => {
+    assert.equal(parseIzinRequest("done: 3 files changed, tests passed"), null);
+    assert.equal(parseIzinRequest("IZIN:"), null);
+    assert.equal(parseIzinRequest(""), null);
+    assert.equal(parseIzinRequest("perizinan sudah diurus admin"), null);
+  });
+});
+
+describe("boundToDir (kungkung AI di folder project)", () => {
+  it("dengan dir: boundary + aturan + prompt asli", () => {
+    const out = boundToDir("hapus folder db", "/ws/sipandu");
+    assert.match(out, /\/ws\/sipandu/);
+    assert.match(out, /do not leave it/);
+    assert.match(out, /sibling project folders/);
+    assert.match(out, /STOP and report/);
+    assert.match(out, /hapus folder db/);
+  });
+  it("tanpa dir: prompt tak diubah", () => {
+    assert.equal(boundToDir("p", ""), "p");
+    assert.equal(boundToDir("p"), "p");
+    assert.equal(boundToDir("p", undefined), "p");
+  });
+});
+
+describe("markReviewed (checklist selesai)", () => {
+  it("done baru → belum review; centang → reviewed", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    markDone(s, t.id);
+    assert.equal(t.reviewedAt, null);
+    assert.equal(markReviewed(s, t.id), true);
+    assert.ok(typeof t.reviewedAt === "string");
+    assert.equal(markReviewed(s, t.id), false); // dobel centang ditolak
+  });
+  it("bukan done / tak dikenal → false", () => {
+    const s = defaultState();
+    const t = pushTask(s, "X", "p");
+    assert.equal(markReviewed(s, t.id), false); // masih queued
+    markDone(s, t.id);
+    assert.equal(markReviewed(s, t.id), true);
+    t.status = "failed";
+    assert.equal(markReviewed(s, t.id), false);
+    assert.equal(markReviewed(s, "t_takada"), false);
+  });
+  it("migrasi: done lama dianggap reviewed, lainnya null", () => {
+    const s = defaultState();
+    const d = pushTask(s, "D", "p");
+    markDone(s, d.id);
+    const raw = JSON.parse(JSON.stringify(s));
+    delete raw.stack[0].reviewedAt;
+    const dir = mkdtempSync(join(tmpdir(), "althea-review-"));
+    const p = join(dir, "state.json");
+    writeFileSync(p, JSON.stringify(raw));
+    const s2 = loadState(p);
+    assert.equal(s2.stack[0].reviewedAt, s2.stack[0].updatedAt);
+  });
+  it("migrasi: null (menunggu review) bertahan saat reload", () => {
+    const s = defaultState();
+    const d = pushTask(s, "D", "p");
+    markDone(s, d.id); // reviewedAt null = menunggu review
+    const dir = mkdtempSync(join(tmpdir(), "althea-review-"));
+    const p = join(dir, "state.json");
+    writeFileSync(p, JSON.stringify(s));
+    const s2 = loadState(p);
+    assert.equal(s2.stack[0].reviewedAt, null);
+    assert.equal(markReviewed(s2, s2.stack[0].id), true);
   });
 });
 

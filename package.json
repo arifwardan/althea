@@ -1,15 +1,17 @@
 {
   "name": "althea",
   "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
   "description": "Althea — runtime otonom laptop-first (nanti VPS+domain), otak Muse CLI, izin via Telegram.",
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:web": "vite",
     "start": "node dist/index.js",
-    "build": "npm run build:web && tsc -p tsconfig.json",
+    "build": "npm run build:web && tsc -p tsconfig.node.json",
     "build:web": "vite build",
-    "check": "tsc --noEmit -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.node.json && svelte-check",
+    "check:web": "svelte-check",
     "test": "env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy node --import tsx --test test/*.test.ts"
   },
   "engines": {
@@ -17,21 +19,23 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
-    "@types/node": "^20.11.0",
+    "@types/node": "^20.19.43",
     "svelte": "^5.57.1",
+    "svelte-check": "^4.7.6",
     "tsx": "^4.7.0",
     "typescript": "^5.5.0",
     "vite": "^8.3.0"
   },
   "dependencies": {
+    "@internationalized/date": "^3.12.4",
     "@langchain/core": "^1.2.12",
     "@langchain/langgraph": "^1.4.16",
+    "@lucide/svelte": "^0.561.0",
     "@tailwindcss/vite": "^4.3.3",
     "adm-zip": "^0.6.1",
     "bits-ui": "^2.19.3",
     "clsx": "^2.1.1",
     "tailwind-merge": "^3.7.0",
-    "tailwind-variants": "^3.3.1",
     "tailwindcss": "^4.3.3"
   },
   "allowScripts": {

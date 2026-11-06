@@ -1,8 +1,22 @@
 // Folder tree untuk tab Files panel review (murni, tanpa dependensi).
 // Dipakai web (App.svelte); dites di test/tree.test.ts.
 // Bentuk node: { name, path, dirs: {nama: node}, files: [{path,size}], count }
-export function buildFileTree(files) {
-  const root = { name: "", path: "", dirs: {}, files: [], count: 0 };
+
+export interface TreeFile {
+  path: string;
+  size: number;
+}
+
+export interface TreeNode {
+  name: string;
+  path: string;
+  dirs: Record<string, TreeNode>;
+  files: TreeFile[];
+  count: number;
+}
+
+export function buildFileTree(files: TreeFile[] | null | undefined): TreeNode {
+  const root: TreeNode = { name: "", path: "", dirs: {}, files: [], count: 0 };
   for (const f of files || []) {
     if (!f || typeof f.path !== "string" || !f.path) continue;
     const parts = f.path.split("/").filter(Boolean);
@@ -24,6 +38,6 @@ export function buildFileTree(files) {
 }
 
 /** Nama folder/file terurut (folder dulu bila diminta dua daftar terpisah). */
-export function sortedNames(dirs) {
+export function sortedNames(dirs: Record<string, TreeNode> | null | undefined): string[] {
   return Object.keys(dirs || {}).sort();
 }
